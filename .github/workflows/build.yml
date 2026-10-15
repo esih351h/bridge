@@ -366,4 +366,38 @@ jobs:
               private val dbg = Paint().apply { color = Color.WHITE; textSize = 12 * d; setShadowLayer(4f, 0f, 0f, Color.BLACK) }
 
               override fun onDraw(cv: Canvas) {
-                  val s = state; val w = width.toFloat(); val h = h
+                  val s = state; val w = width.toFloat(); val h = height.toFloat()
+                  cv.drawText(s.debug, 8 * d, h - 8 * d, dbg)
+                  if (!s.ok) return
+                  val sc = w / s.capW
+                  // landing zone on the next platform + aim line
+                  cv.drawRect((s.baseX + s.winLo) * sc, (s.ytop - 14) * sc, (s.baseX + s.winHi) * sc, (s.ytop - 8) * sc, win)
+                  cv.drawLine((s.baseX + s.aim) * sc, (s.ytop - 80) * sc, (s.baseX + s.aim) * sc, (s.ytop - 8) * sc, green)
+                  val (msg, col) = when (s.phase) {
+                      2 -> "RELEASE!" to Color.rgb(0, 255, 0)
+                      3 -> "TOO LONG" to Color.rgb(255, 60, 60)
+                      1 -> "Hold… %d%%".format((100 * s.len / s.aim).toInt().coerceIn(0, 99)) to Color.WHITE
+                      else -> "" to Color.WHITE
+                  }
+                  if (msg.isNotEmpty()) {
+                      txt.color = col; txt.textSize = 40 * d
+                      cv.drawText(msg, w / 2, h * 0.36f, txt)
+                  }
+                  if (s.phase == 2 || s.phase == 3) {
+                      val p = Paint().apply { color = col; style = Paint.Style.STROKE; strokeWidth = 12 * d }
+                      cv.drawRect(0f, 0f, w, h, p)
+                  }
+              }
+          }
+          BH_EOF
+      - name: Accept SDK licenses
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+      - name: Build debug APK
+        run: gradle assembleDebug --no-daemon
+      - name: Publish APK to Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Bridge Helper build ${{ github.run_number }}
+          files: app/build/outputs/apk/debug/app-debug.apk
+          
