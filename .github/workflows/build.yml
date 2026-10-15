@@ -186,7 +186,7 @@ jobs:
               // geometry smoothing / freezing while the pole grows
               private val hist = ArrayList<FloatArray>()
               private var fValid = false; private var fTop = 0; private var fBase = 0
-              private var fGap = 0f; private var fPw = 0f; private var fW = 1
+              private var fGap = 0f; private var fPw = 0f; private var fW = 1; private var fAim = 0f
               // pole growth samples
               private val tsN = ArrayList<Float>(); private val lsN = ArrayList<Float>()
               private var t0 = 0L; private var cued = false
@@ -324,13 +324,13 @@ jobs:
                   }
 
                   // 1) platform top = first row with lots of teal
-                  val thr = (W * 0.04f).toInt()
-                  var ytop = -1; var best = 0; var bestY = 0
+                  val thr = max(4, (W * 0.015f).toInt()); val need = max(3, (W * 0.005f).toInt())
+                  var ytop = -1; var best = 0; var bestY = 0; var streak = 0
                   for (y in (H * 0.30f).toInt() until (H * 0.98f).toInt()) {
                       var c = 0; var x = 0
                       while (x < W) { if (teal(x, y)) c++; x += 2 }
                       if (c > best) { best = c; bestY = y }
-                      if (c >= thr) { ytop = y; break }
+                      if (c >= thr) { streak++; if (streak >= need) { ytop = y - need + 1; break } } else streak = 0
                   }
                   if (ytop < 0) {
                       hist.clear()
@@ -348,34 +348,48 @@ jobs:
                       else if (s >= 0 && x - last > tol) { runs.add(intArrayOf(s, last)); s = -1 }
                   }
                   if (s >= 0) runs.add(intArrayOf(s, last))
-                  val wide = runs.filter { it[1] - it[0] > W * 0.05f }
+                  val wide = runs.filter { it[1] - it[0] >= max(4f, W * 0.008f) }
                   if (wide.size < 2) { hist.clear(); publish(GuideState(false, debug = "need 2 platforms: runs=%d row=%d %dx%d".format(wide.size, sy, W, H))); return }
                   val left = wide[0]; val right = wide[1]
                   val gap = (right[0] - left[1]).toFloat(); val pw = (right[1] - right[0]).toFloat()
                   if (gap < W * 0.02f) { hist.clear(); publish(GuideState(false, debug = "gap too small")); return }
 
+                  // 2b) the small blue "perfect landing" dot on top of the next platform
+                  var sx = 0L; var cnt = 0
+                  for (y in max(0, ytop - 1)..min(H - 1, ytop + max(4, (W * 0.012f).toInt())))
+                      for (x in right[0]..right[1])
+                          if (b(x, y) > g(x, y) + 35 && b(x, y) >= 140 && r(x, y) < 90) { sx += x; cnt++ }
+                  val dotRel = if (cnt in 2..40) sx.toFloat() / cnt - left[1] - W * 0.004f else -1f
+
                   // 3) average the last few readings (reset if the scene jumped, e.g. scrolling)
                   if (hist.isNotEmpty() && abs(gap - hist.last()[0]) > W * 0.03f) hist.clear()
-                  hist.add(floatArrayOf(gap, pw, left[1].toFloat(), ytop.toFloat()))
+                  hist.add(floatArrayOf(gap, pw, left[1].toFloat(), ytop.toFloat(), dotRel))
                   if (hist.size > 5) hist.removeAt(0)
-                  val m = FloatArray(4) { k -> hist.map { it[k] }.average().toFloat() }
+                  val m = FloatArray(5) { k ->
+                      val v = if (k == 4) hist.map { it[4] }.filter { it > 0f } else hist.map { it[k] }
+                      if (v.isEmpty()) -1f else v.average().toFloat()
+                  }
+                  val aimNow = chooseAim(m)
 
                   val len = measure(m[3].toInt(), m[2].toInt())
                   if (len > minLen) {
-                      fValid = true; fGap = m[0]; fPw = m[1]; fBase = m[2].toInt(); fTop = m[3].toInt(); fW = W
+                      fValid = true; fGap = m[0]; fPw = m[1]; fBase = m[2].toInt(); fTop = m[3].toInt(); fW = W; fAim = aimNow
                       hold(img.timestamp, len); return
                   }
                   resetHold()
-                  val aim = m[0] + aimFrac * m[1]
-                  publish(GuideState(true, m[3], m[2], m[0] + 0.2f * m[1], m[0] + 0.8f * m[1], aim, 0f, 0, W,
-                      "gap=%.0f w=%.0f".format(m[0], m[1])))
+                  publish(GuideState(true, m[3], m[2], m[0] + 0.2f * m[1], m[0] + 0.8f * m[1], aimNow, 0f, 0, W,
+                      "gap=%.0f w=%.0f dot=%s".format(m[0], m[1], if (m[4] > 0f) "yes" else "no")))
               }
+
+              /** Aim at the blue dot when it was seen and looks sane, else at aimFrac across the platform. */
+              private fun chooseAim(m: FloatArray): Float =
+                  if (m[4] > m[0] && m[4] < m[0] + m[1]) m[4] else m[0] + aimFrac * m[1]
 
               private fun resetHold() { tsN.clear(); lsN.clear(); cued = false }
 
               /** Called for every frame while the pole is growing. */
               private fun hold(ts: Long, len: Float) {
-                  val aim = fGap + aimFrac * fPw
+                  val aim = fAim
                   val lo = fGap + 0.2f * fPw; val hi = fGap + 0.8f * fPw
                   if (tsN.isEmpty()) t0 = ts
                   tsN.add((ts - t0) / 1e9f); lsN.add(len)
@@ -469,4 +483,3 @@ jobs:
           tag_name: build-${{ github.run_number }}
           name: Bridge Helper build ${{ github.run_number }}
           files: app/build/outputs/apk/debug/app-debug.apk
-          
