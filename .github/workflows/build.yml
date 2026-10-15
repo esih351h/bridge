@@ -396,6 +396,7 @@ jobs:
               @Volatile var state = GuideState(false, debug = "starting")
               private val d = resources.displayMetrics.density
               private val green = Paint().apply { color = Color.rgb(0, 230, 0); strokeWidth = 4 * d; style = Paint.Style.STROKE }
+              private val thin = Paint().apply { strokeWidth = 2 * d; style = Paint.Style.STROKE }
               private val win = Paint().apply { color = Color.argb(200, 0, 230, 0) }
               private val txt = Paint().apply { isAntiAlias = true; textAlign = Paint.Align.CENTER; setShadowLayer(6f, 0f, 0f, Color.BLACK) }
               private val dbg = Paint().apply { color = Color.WHITE; textSize = 12 * d; setShadowLayer(4f, 0f, 0f, Color.BLACK) }
@@ -407,7 +408,19 @@ jobs:
                   val sc = w / s.capW
                   // landing zone on the next platform + aim line
                   cv.drawRect((s.baseX + s.winLo) * sc, (s.ytop - 14) * sc, (s.baseX + s.winHi) * sc, (s.ytop - 8) * sc, win)
-                  cv.drawLine((s.baseX + s.aim) * sc, (s.ytop - 80) * sc, (s.baseX + s.aim) * sc, (s.ytop - 8) * sc, green)
+                  // Length ruler beside the spot where the pole grows: the pole should reach the top mark
+                  val rx = (s.baseX + s.capW * 0.03f) * sc
+                  val y0 = (s.ytop - 2) * sc
+                  fun yAt(v: Float) = max(0f, (s.ytop - v) * sc)
+                  thin.color = Color.argb(140, 255, 255, 255)
+                  cv.drawLine(rx, y0, rx, yAt(s.winHi), thin)
+                  cv.drawLine(rx, yAt(s.winLo), rx, yAt(s.winHi), green)
+                  cv.drawLine(rx - 14 * d, yAt(s.aim), rx + 14 * d, yAt(s.aim), green)
+                  if (s.len > 0f) {
+                      val cy = yAt(s.len)
+                      val dot = Paint().apply { color = if (s.phase == 3) Color.RED else Color.WHITE }
+                      cv.drawCircle(rx, cy, 6 * d, dot)
+                  }
                   val (msg, col) = when (s.phase) {
                       2 -> "RELEASE!" to Color.rgb(0, 255, 0)
                       3 -> "TOO LONG" to Color.rgb(255, 60, 60)
