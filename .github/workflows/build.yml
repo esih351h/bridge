@@ -179,6 +179,7 @@ jobs:
               private lateinit var bg: Handler
               private val ui = Handler(Looper.getMainLooper())
               private var guide: GuideView? = null
+              private var dispListener: DisplayManager.DisplayListener? = null
               private var capW = 1; private var capH = 1
               private var leadMs = 100f; private var aimFrac = 0.5f
 
@@ -235,13 +236,22 @@ jobs:
                   reader = buildReader()
                   vd = projection!!.createVirtualDisplay("cap", capW, capH, resources.displayMetrics.densityDpi,
                       DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, reader!!.surface, null, bg)
+                  val dm = getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
+                  dm.registerDisplayListener(object : DisplayManager.DisplayListener {
+                      override fun onDisplayAdded(id: Int) {}
+                      override fun onDisplayRemoved(id: Int) {}
+                      override fun onDisplayChanged(id: Int) { if (id == Display.DEFAULT_DISPLAY) rebuild() }
+                  }.also { dispListener = it }, bg)
                   return START_NOT_STICKY
               }
 
-              private fun screenSize(): Pair<Int, Int> =
-                  if (Build.VERSION.SDK_INT >= 30) wm.currentWindowMetrics.bounds.let { it.width() to it.height() }
-                  else DisplayMetrics().also { @Suppress("DEPRECATION") wm.defaultDisplay.getRealMetrics(it) }
-                      .let { it.widthPixels to it.heightPixels }
+              @Suppress("DEPRECATION")
+              private fun screenSize(): Pair<Int, Int> {
+                  val dm = getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
+                  val m = DisplayMetrics()
+                  dm.getDisplay(Display.DEFAULT_DISPLAY).getRealMetrics(m)
+                  return m.widthPixels to m.heightPixels
+              }
 
               private fun buildReader(): ImageReader {
                   val (sw, sh) = screenSize()
@@ -254,15 +264,20 @@ jobs:
                   return r
               }
 
+              private fun rebuild() {
+                  val (sw, sh) = screenSize()
+                  val nw = min(sw, 640); val nh = sh * nw / sw
+                  if (reader != null && nw == capW && nh == capH) return
+                  val old = reader
+                  reader = buildReader()
+                  vd?.resize(capW, capH, resources.displayMetrics.densityDpi)
+                  vd?.surface = reader!!.surface
+                  old?.close()
+              }
+
               override fun onConfigurationChanged(c: Configuration) {
                   super.onConfigurationChanged(c)
-                  bg.post {
-                      val old = reader
-                      reader = buildReader()
-                      vd?.resize(capW, capH, resources.displayMetrics.densityDpi)
-                      vd?.surface = reader!!.surface
-                      old?.close()
-                  }
+                  bg.post { rebuild() }
               }
 
               // ---------- detection ----------
@@ -288,8 +303,8 @@ jobs:
                   // current pole length: vertical run of pole-blue above the left platform's edge
                   fun measure(ytop: Int, base: Int): Float {
                       val x0 = max(0, base - (W * 0.006f).toInt()); val x1 = min(W - 1, base + (W * 0.016f).toInt())
-                      val yMin = (H * 0.28f).toInt(); val yStart = ytop - max(3, (H * 0.01f).toInt())
-                      val gapTol = max(3, (H * 0.012f).toInt())
+                      val yMin = max(0, ytop - (W * 0.40f).toInt()); val yStart = ytop - max(3, (W * 0.006f).toInt())
+                      val gapTol = max(3, (W * 0.008f).toInt())
                       var lastHit = yStart; var y = yStart
                       while (y >= yMin) {
                           var hit = false; var x = x0
@@ -299,7 +314,7 @@ jobs:
                       }
                       return (ytop - lastHit).toFloat()
                   }
-                  val minLen = max(10f, H * 0.02f)
+                  val minLen = max(10f, W * 0.015f)
 
                   // While a pole is growing, keep the geometry measured just before it started.
                   if (fValid) {
@@ -310,16 +325,21 @@ jobs:
 
                   // 1) platform top = first row with lots of teal
                   val thr = (W * 0.04f).toInt()
-                  var ytop = -1
-                  for (y in (H * 0.35f).toInt() until (H * 0.95f).toInt()) {
+                  var ytop = -1; var best = 0; var bestY = 0
+                  for (y in (H * 0.30f).toInt() until (H * 0.98f).toInt()) {
                       var c = 0; var x = 0
                       while (x < W) { if (teal(x, y)) c++; x += 2 }
+                      if (c > best) { best = c; bestY = y }
                       if (c >= thr) { ytop = y; break }
                   }
-                  if (ytop < 0) { hist.clear(); publish(GuideState(false, debug = "no platforms")); return }
+                  if (ytop < 0) {
+                      hist.clear()
+                      publish(GuideState(false, debug = "no platforms %dx%d best=%d@%d need=%d".format(W, H, best, bestY, thr)))
+                      return
+                  }
 
                   // 2) stone runs just below the top edge -> platform extents
-                  val sy = min(H - 1, (ytop + H * 0.045f).toInt())
+                  val sy = min(H - 1, (ytop + W * 0.025f).toInt())
                   val tol = max(2, (W * 0.004f).toInt())
                   val runs = mutableListOf<IntArray>()
                   var s = -1; var last = -1
@@ -329,7 +349,7 @@ jobs:
                   }
                   if (s >= 0) runs.add(intArrayOf(s, last))
                   val wide = runs.filter { it[1] - it[0] > W * 0.05f }
-                  if (wide.size < 2) { hist.clear(); publish(GuideState(false, debug = "need 2 platforms")); return }
+                  if (wide.size < 2) { hist.clear(); publish(GuideState(false, debug = "need 2 platforms: runs=%d row=%d %dx%d".format(wide.size, sy, W, H))); return }
                   val left = wide[0]; val right = wide[1]
                   val gap = (right[0] - left[1]).toFloat(); val pw = (right[1] - right[0]).toFloat()
                   if (gap < W * 0.02f) { hist.clear(); publish(GuideState(false, debug = "gap too small")); return }
@@ -385,6 +405,7 @@ jobs:
               private fun publish(s: GuideState) = ui.post { guide?.let { it.state = s; it.invalidate() } }
 
               override fun onDestroy() {
+                  dispListener?.let { (getSystemService(Context.DISPLAY_SERVICE) as DisplayManager).unregisterDisplayListener(it) }
                   vd?.release(); reader?.close(); projection?.stop()
                   guide?.let { runCatching { wm.removeView(it) } }
                   if (::ht.isInitialized) ht.quitSafely()
@@ -448,3 +469,4 @@ jobs:
           tag_name: build-${{ github.run_number }}
           name: Bridge Helper build ${{ github.run_number }}
           files: app/build/outputs/apk/debug/app-debug.apk
+          
