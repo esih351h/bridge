@@ -241,12 +241,17 @@ jobs:
                   }, bg)
 
                   guide = GuideView(this).also {
-                      wm.addView(it, WindowManager.LayoutParams(
+                      val lp = WindowManager.LayoutParams(
                           WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT,
                           WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
                           WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
                               WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
-                          PixelFormat.TRANSLUCENT))
+                          PixelFormat.TRANSLUCENT)
+                      if (Build.VERSION.SDK_INT >= 30)
+                          lp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+                      else if (Build.VERSION.SDK_INT >= 28)
+                          lp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+                      wm.addView(it, lp)
                   }
                   reader = buildReader()
                   vd = projection!!.createVirtualDisplay("cap", capW, capH, resources.displayMetrics.densityDpi,
@@ -373,12 +378,12 @@ jobs:
                   }
 
                   // 2) stone runs just below the top edge -> platform extents
-                  val sy = min(H - 1, (ytop + W * 0.025f).toInt())
+                  val sy = min(H - 1, (ytop + W * 0.014f).toInt()); val sy2 = min(H - 1, (ytop + W * 0.017f).toInt())
                   val tol = max(2, (W * 0.004f).toInt())
                   val runs = mutableListOf<IntArray>()
                   var s = -1; var last = -1
                   for (x in 0 until W) {
-                      if (stone(x, sy)) { if (s < 0) s = x; last = x }
+                      if (stone(x, sy) || stone(x, sy2)) { if (s < 0) s = x; last = x }
                       else if (s >= 0 && x - last > tol) { runs.add(intArrayOf(s, last)); s = -1 }
                   }
                   if (s >= 0) runs.add(intArrayOf(s, last))
@@ -466,12 +471,26 @@ jobs:
               private val d = resources.displayMetrics.density
               private val paint = Paint().apply { isAntiAlias = true }
               private val dbg = Paint().apply { color = Color.WHITE; textSize = 11 * d; setShadowLayer(4f, 0f, 0f, Color.BLACK) }
+              private val loc = IntArray(2)
+
+              @Suppress("DEPRECATION")
+              private fun displayWidth(): Int {
+                  val dm = context.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
+                  val m = DisplayMetrics()
+                  dm.getDisplay(Display.DEFAULT_DISPLAY).getRealMetrics(m)
+                  return max(m.widthPixels, m.heightPixels)
+              }
 
               override fun onDraw(cv: Canvas) {
                   val s = state; val w = width.toFloat(); val h = height.toFloat()
                   cv.drawText("f=$frames ${s.debug}", 8 * d, h - 8 * d, dbg)
                   if (!s.ok) return
-                  val sc = w / s.capW
+
+                  // capture pixel -> pixel inside this window (the window may not start at the screen's corner)
+                  getLocationOnScreen(loc)
+                  val sx = displayWidth().toFloat() / s.capW
+                  fun X(v: Float) = v * sx - loc[0]
+                  fun Y(v: Float) = v * sx - loc[1]
 
                   // One colour tells the whole story: white = idle, amber = growing, green = release now, red = too long
                   val c = when (s.phase) {
@@ -483,31 +502,30 @@ jobs:
                   fun stroke(width: Float, color: Int) { paint.style = Paint.Style.STROKE; paint.strokeWidth = width; paint.color = color }
                   fun fill(color: Int) { paint.style = Paint.Style.FILL; paint.color = color }
 
-                  val ax = (s.baseX + s.aim) * sc          // anchor x on screen
-                  val bx = s.baseX * sc                    // pole base x on screen
+                  val ax = X(s.baseX + s.aim)    // anchor x
+                  val bx = X(s.baseX)            // pole base x
 
-                  // Platform overlay right under the anchor point (below the row the detector reads)
+                  // Platform overlay right under the anchor point (kept below the rows the detector measures)
                   val half = (s.winHi - s.winLo) / 2f
                   fill(c)
-                  cv.drawRoundRect(
-                      (s.baseX + s.aim - half) * sc, (s.ytop + s.capW * 0.034f) * sc,
-                      (s.baseX + s.aim + half) * sc, (s.ytop + s.capW * 0.044f) * sc, 6 * d, 6 * d, paint)
+                  cv.drawRoundRect(X(s.baseX + s.aim - half), Y(s.ytop + s.capW * 0.021f),
+                      X(s.baseX + s.aim + half), Y(s.ytop + s.capW * 0.031f), 6 * d, 6 * d, paint)
 
                   // Reach line: the pole must be as long as base -> anchor. Thin so the pole stays visible to the detector.
-                  val ly = (s.ytop - 12) * sc
+                  val ly = Y(s.ytop - 12)
                   stroke(2 * d, Color.argb(200, 255, 255, 255))
                   cv.drawLine(bx, ly, ax, ly, paint)
                   if (s.len > 0f) {
                       stroke(2 * d, c)
-                      cv.drawLine(bx, ly, (s.baseX + min(s.len, s.aim)) * sc, ly, paint)
+                      cv.drawLine(bx, ly, X(s.baseX + min(s.len, s.aim)), ly, paint)
                   }
                   fill(c); cv.drawCircle(ax, ly, 7 * d, paint)
 
                   // Length ruler beside the pole's spawn point
-                  val rx = (s.baseX + s.capW * 0.03f) * sc
-                  fun yAt(v: Float) = max(0f, (s.ytop - v) * sc)
+                  val rx = X(s.baseX + s.capW * 0.03f)
+                  fun yAt(v: Float) = max(0f, Y(s.ytop - v))
                   stroke(2 * d, Color.argb(140, 255, 255, 255))
-                  cv.drawLine(rx, (s.ytop - 2) * sc, rx, yAt(s.winHi), paint)
+                  cv.drawLine(rx, Y(s.ytop - 2), rx, yAt(s.winHi), paint)
                   stroke(4 * d, c)
                   cv.drawLine(rx, yAt(s.winLo), rx, yAt(s.winHi), paint)
                   cv.drawLine(rx - 14 * d, yAt(s.aim), rx + 14 * d, yAt(s.aim), paint)
