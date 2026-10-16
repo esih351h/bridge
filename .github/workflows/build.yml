@@ -179,7 +179,8 @@ jobs:
               private lateinit var bg: Handler
               private val ui = Handler(Looper.getMainLooper())
               private var guide: GuideView? = null
-              private var dispListener: DisplayManager.DisplayListener? = null
+              @Volatile private var frames = 0
+              @Volatile private var swap = false   // some devices deliver red/blue swapped
               private var capW = 1; private var capH = 1
               private var leadMs = 100f; private var aimFrac = 0.5f
 
@@ -236,12 +237,6 @@ jobs:
                   reader = buildReader()
                   vd = projection!!.createVirtualDisplay("cap", capW, capH, resources.displayMetrics.densityDpi,
                       DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, reader!!.surface, null, bg)
-                  val dm = getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
-                  dm.registerDisplayListener(object : DisplayManager.DisplayListener {
-                      override fun onDisplayAdded(id: Int) {}
-                      override fun onDisplayRemoved(id: Int) {}
-                      override fun onDisplayChanged(id: Int) { if (id == Display.DEFAULT_DISPLAY) rebuild() }
-                  }.also { dispListener = it }, bg)
                   return START_NOT_STICKY
               }
 
@@ -255,38 +250,27 @@ jobs:
 
               private fun buildReader(): ImageReader {
                   val (sw, sh) = screenSize()
-                  capW = min(sw, 640); capH = sh * capW / sw
+                  val long = max(sw, sh); val short = min(sw, sh)   // the game is landscape
+                  capW = min(long, 640); capH = short * capW / long
                   val r = ImageReader.newInstance(capW, capH, PixelFormat.RGBA_8888, 2)
                   r.setOnImageAvailableListener({ rd ->
                       val img = rd.acquireLatestImage()
-                      if (img != null) try { analyze(img) } catch (_: Exception) { } finally { img.close() }
+                      if (img != null) {
+                          try { frames++; analyze(img) }
+                          catch (e: Exception) { publish(GuideState(false, debug = "error: ${e.javaClass.simpleName} ${e.message}")) }
+                          finally { img.close() }
+                      }
                   }, bg)
                   return r
-              }
-
-              private fun rebuild() {
-                  val (sw, sh) = screenSize()
-                  val nw = min(sw, 640); val nh = sh * nw / sw
-                  if (reader != null && nw == capW && nh == capH) return
-                  val old = reader
-                  reader = buildReader()
-                  vd?.resize(capW, capH, resources.displayMetrics.densityDpi)
-                  vd?.surface = reader!!.surface
-                  old?.close()
-              }
-
-              override fun onConfigurationChanged(c: Configuration) {
-                  super.onConfigurationChanged(c)
-                  bg.post { rebuild() }
               }
 
               // ---------- detection ----------
               private fun analyze(img: Image) {
                   val W = img.width; val H = img.height
                   val pl = img.planes[0]; val buf = pl.buffer; val rs = pl.rowStride
-                  fun r(x: Int, y: Int) = buf.get(y * rs + x * 4).toInt() and 255
+                  fun r(x: Int, y: Int) = buf.get(y * rs + x * 4 + (if (swap) 2 else 0)).toInt() and 255
                   fun g(x: Int, y: Int) = buf.get(y * rs + x * 4 + 1).toInt() and 255
-                  fun b(x: Int, y: Int) = buf.get(y * rs + x * 4 + 2).toInt() and 255
+                  fun b(x: Int, y: Int) = buf.get(y * rs + x * 4 + (if (swap) 0 else 2)).toInt() and 255
                   fun teal(x: Int, y: Int): Boolean {
                       val rr = r(x, y); val gg = g(x, y); val bb = b(x, y)
                       return rr < 90 && gg in 95..190 && bb in 100..210 && gg > rr + 60 && abs(gg - bb) < 50
@@ -334,7 +318,28 @@ jobs:
                   }
                   if (ytop < 0) {
                       hist.clear()
-                      publish(GuideState(false, debug = "no platforms %dx%d best=%d@%d need=%d".format(W, H, best, bestY, thr)))
+                      // average colour of a sample grid (tells us if the capture is black)
+                      var sr = 0L; var sg = 0L; var sb = 0L; var n = 0
+                      for (yy in 0 until 8) for (xx in 0 until 16) {
+                          val px = (W * (xx + 0.5f) / 16).toInt(); val py = (H * (yy + 0.5f) / 8).toInt()
+                          sr += r(px, py); sg += g(px, py); sb += b(px, py); n++
+                      }
+                      val black = sr + sg + sb < n * 12L
+                      // would the platforms show up if red and blue were swapped?
+                      var altHit = false
+                      for (y in (H * 0.30f).toInt() until (H * 0.98f).toInt()) {
+                          var c = 0; var x = 0
+                          while (x < W) {
+                              val rr = b(x, y); val gg = g(x, y); val bb = r(x, y)
+                              if (rr < 90 && gg in 95..190 && bb in 100..210 && gg > rr + 60 && abs(gg - bb) < 50) c++
+                              x += 2
+                          }
+                          if (c >= thr) { altHit = true; break }
+                      }
+                      if (altHit) swap = !swap
+                      val note = when { black -> "BLACK capture"; altHit -> "swapped colours, retrying"; else -> "no platforms" }
+                      publish(GuideState(false, debug = "%s %dx%d best=%d avg=(%d,%d,%d)".format(
+                          note, W, H, best, sr / n, sg / n, sb / n)))
                       return
                   }
 
@@ -416,10 +421,9 @@ jobs:
                   if (Build.VERSION.SDK_INT >= 26) v.vibrate(VibrationEffect.createOneShot(60, 255)) else v.vibrate(60)
               }
 
-              private fun publish(s: GuideState) = ui.post { guide?.let { it.state = s; it.invalidate() } }
+              private fun publish(s: GuideState) { val f = frames; ui.post { guide?.let { it.state = s; it.frames = f; it.invalidate() } } }
 
               override fun onDestroy() {
-                  dispListener?.let { (getSystemService(Context.DISPLAY_SERVICE) as DisplayManager).unregisterDisplayListener(it) }
                   vd?.release(); reader?.close(); projection?.stop()
                   guide?.let { runCatching { wm.removeView(it) } }
                   if (::ht.isInitialized) ht.quitSafely()
@@ -429,13 +433,14 @@ jobs:
 
           class GuideView(c: Context) : View(c) {
               @Volatile var state = GuideState(false, debug = "starting")
+              @Volatile var frames = 0
               private val d = resources.displayMetrics.density
               private val paint = Paint().apply { isAntiAlias = true }
               private val dbg = Paint().apply { color = Color.WHITE; textSize = 11 * d; setShadowLayer(4f, 0f, 0f, Color.BLACK) }
 
               override fun onDraw(cv: Canvas) {
                   val s = state; val w = width.toFloat(); val h = height.toFloat()
-                  cv.drawText(s.debug, 8 * d, h - 8 * d, dbg)
+                  cv.drawText("f=$frames ${s.debug}", 8 * d, h - 8 * d, dbg)
                   if (!s.ok) return
                   val sc = w / s.capW
 
