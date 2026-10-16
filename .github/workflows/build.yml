@@ -430,58 +430,59 @@ jobs:
           class GuideView(c: Context) : View(c) {
               @Volatile var state = GuideState(false, debug = "starting")
               private val d = resources.displayMetrics.density
-              private val green = Paint().apply { color = Color.rgb(0, 230, 0); strokeWidth = 4 * d; style = Paint.Style.STROKE }
-              private val thin = Paint().apply { strokeWidth = 2 * d; style = Paint.Style.STROKE }
-              private val win = Paint().apply { color = Color.argb(200, 0, 230, 0) }
-              private val txt = Paint().apply { isAntiAlias = true; textAlign = Paint.Align.CENTER; setShadowLayer(6f, 0f, 0f, Color.BLACK) }
-              private val dbg = Paint().apply { color = Color.WHITE; textSize = 12 * d; setShadowLayer(4f, 0f, 0f, Color.BLACK) }
+              private val paint = Paint().apply { isAntiAlias = true }
+              private val dbg = Paint().apply { color = Color.WHITE; textSize = 11 * d; setShadowLayer(4f, 0f, 0f, Color.BLACK) }
 
               override fun onDraw(cv: Canvas) {
                   val s = state; val w = width.toFloat(); val h = height.toFloat()
                   cv.drawText(s.debug, 8 * d, h - 8 * d, dbg)
                   if (!s.ok) return
                   val sc = w / s.capW
-                  // landing zone on the next platform + aim line
-                  cv.drawRect((s.baseX + s.winLo) * sc, (s.ytop - 14) * sc, (s.baseX + s.winHi) * sc, (s.ytop - 8) * sc, win)
-                  // Length ruler beside the spot where the pole grows: the pole should reach the top mark
-                  val rx = (s.baseX + s.capW * 0.03f) * sc
-                  val y0 = (s.ytop - 2) * sc
-                  fun yAt(v: Float) = max(0f, (s.ytop - v) * sc)
-                  thin.color = Color.argb(140, 255, 255, 255)
-                  cv.drawLine(rx, y0, rx, yAt(s.winHi), thin)
-                  cv.drawLine(rx, yAt(s.winLo), rx, yAt(s.winHi), green)
-                  cv.drawLine(rx - 14 * d, yAt(s.aim), rx + 14 * d, yAt(s.aim), green)
-                  if (s.len > 0f) {
-                      val cy = yAt(s.len)
-                      val dot = Paint().apply { color = if (s.phase == 3) Color.RED else Color.WHITE }
-                      cv.drawCircle(rx, cy, 6 * d, dot)
+
+                  // One colour tells the whole story: white = idle, amber = growing, green = release now, red = too long
+                  val c = when (s.phase) {
+                      1 -> Color.rgb(255, 179, 0)
+                      2 -> Color.rgb(0, 230, 0)
+                      3 -> Color.rgb(255, 60, 60)
+                      else -> Color.argb(220, 255, 255, 255)
                   }
-                  // Reach line: the pole must be as long as the distance from its base to the anchor dot.
-                  // Kept thin so it doesn't hide the pole pixels the detector looks at.
+                  fun stroke(width: Float, color: Int) { paint.style = Paint.Style.STROKE; paint.strokeWidth = width; paint.color = color }
+                  fun fill(color: Int) { paint.style = Paint.Style.FILL; paint.color = color }
+
+                  val ax = (s.baseX + s.aim) * sc          // anchor x on screen
+                  val bx = s.baseX * sc                    // pole base x on screen
+
+                  // Platform overlay right under the anchor point (below the row the detector reads)
+                  val half = (s.winHi - s.winLo) / 2f
+                  fill(c)
+                  cv.drawRoundRect(
+                      (s.baseX + s.aim - half) * sc, (s.ytop + s.capW * 0.034f) * sc,
+                      (s.baseX + s.aim + half) * sc, (s.ytop + s.capW * 0.044f) * sc, 6 * d, 6 * d, paint)
+
+                  // Reach line: the pole must be as long as base -> anchor. Thin so the pole stays visible to the detector.
                   val ly = (s.ytop - 12) * sc
-                  val bx = s.baseX * sc; val ax = (s.baseX + s.aim) * sc
-                  thin.color = Color.argb(200, 255, 255, 255)
-                  cv.drawLine(bx, ly, ax, ly, thin)
+                  stroke(2 * d, Color.argb(200, 255, 255, 255))
+                  cv.drawLine(bx, ly, ax, ly, paint)
                   if (s.len > 0f) {
-                      thin.color = if (s.phase == 3) Color.RED else Color.rgb(0, 230, 0)
-                      cv.drawLine(bx, ly, (s.baseX + min(s.len, s.aim)) * sc, ly, thin)
+                      stroke(2 * d, c)
+                      cv.drawLine(bx, ly, (s.baseX + min(s.len, s.aim)) * sc, ly, paint)
                   }
-                  cv.drawCircle(ax, ly, 7 * d, Paint().apply { color = Color.rgb(0, 230, 0) })
+                  fill(c); cv.drawCircle(ax, ly, 7 * d, paint)
 
-                  // Lengths in dp so the numbers mean the same on any screen
-                  val need = (s.aim * sc / d).toInt(); val now = (s.len * sc / d).toInt()
-                  val (msg, col) = when (s.phase) {
-                      2 -> "RELEASE!" to Color.rgb(0, 255, 0)
-                      3 -> "TOO LONG" to Color.rgb(255, 60, 60)
-                      1 -> "Pole $now / $need" to Color.WHITE
-                      else -> "Pole needs $need" to Color.WHITE
-                  }
-                  txt.color = col; txt.textSize = (if (s.phase >= 2) 40 else 28) * d
-                  cv.drawText(msg, w / 2, h * 0.36f, txt)
+                  // Length ruler beside the pole's spawn point
+                  val rx = (s.baseX + s.capW * 0.03f) * sc
+                  fun yAt(v: Float) = max(0f, (s.ytop - v) * sc)
+                  stroke(2 * d, Color.argb(140, 255, 255, 255))
+                  cv.drawLine(rx, (s.ytop - 2) * sc, rx, yAt(s.winHi), paint)
+                  stroke(4 * d, c)
+                  cv.drawLine(rx, yAt(s.winLo), rx, yAt(s.winHi), paint)
+                  cv.drawLine(rx - 14 * d, yAt(s.aim), rx + 14 * d, yAt(s.aim), paint)
+                  if (s.len > 0f) { fill(if (s.phase == 3) Color.RED else Color.WHITE); cv.drawCircle(rx, yAt(s.len), 6 * d, paint) }
 
+                  // Screen border flashes when it is time to release (green) or you overshot (red)
                   if (s.phase == 2 || s.phase == 3) {
-                      val p = Paint().apply { color = col; style = Paint.Style.STROKE; strokeWidth = 12 * d }
-                      cv.drawRect(0f, 0f, w, h, p)
+                      stroke(12 * d, c)
+                      cv.drawRect(0f, 0f, w, h, paint)
                   }
               }
           }
