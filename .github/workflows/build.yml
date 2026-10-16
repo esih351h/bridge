@@ -92,6 +92,7 @@ jobs:
           class MainActivity : Activity() {
               private lateinit var lead: EditText
               private lateinit var aim: EditText
+              private lateinit var statusView: TextView
 
               override fun onCreate(b: Bundle?) {
                   super.onCreate(b)
@@ -125,9 +126,19 @@ jobs:
                       startActivityForResult(mpm.createScreenCaptureIntent(), 100)
                   })
                   root.addView(btn("Stop") { stopService(Intent(this, OverlayService::class.java)) })
+                  root.addView(tv("Status (also shown in the notification while it runs):"))
+                  statusView = TextView(this).apply { text = prefs.getString("status", "not started") }
+                  root.addView(statusView)
+                  root.addView(btn("Refresh status") { showStatus() })
                   root.addView(tv("Choose \"Entire screen\" if asked what to share. Then open the game. The app finds the platforms, " +
                       "marks the landing zone, vibrates when to let go, and shows RELEASE / TOO LONG on screen."))
                   setContentView(ScrollView(this).apply { addView(root) })
+              }
+
+              override fun onResume() { super.onResume(); showStatus() }
+
+              private fun showStatus() {
+                  statusView.text = getSharedPreferences("p", MODE_PRIVATE).getString("status", "not started")
               }
 
               @Deprecated("Deprecated in Java")
@@ -180,6 +191,8 @@ jobs:
               private val ui = Handler(Looper.getMainLooper())
               private var guide: GuideView? = null
               @Volatile private var frames = 0
+              private lateinit var nb: Notification.Builder
+              private var lastStatusT = 0L
               @Volatile private var swap = false   // some devices deliver red/blue swapped
               private var capW = 1; private var capH = 1
               private var leadMs = 100f; private var aimFrac = 0.5f
@@ -209,11 +222,12 @@ jobs:
                   val ch = "ov"
                   (getSystemService(NOTIFICATION_SERVICE) as NotificationManager)
                       .createNotificationChannel(NotificationChannel(ch, "Overlay", NotificationManager.IMPORTANCE_LOW))
-                  val n = Notification.Builder(this, ch).setContentTitle("Bridge Helper running")
-                      .setSmallIcon(android.R.drawable.ic_menu_compass).build()
+                  nb = Notification.Builder(this, ch).setContentTitle("Bridge Helper running")
+                      .setContentText("starting…").setSmallIcon(android.R.drawable.ic_menu_compass)
                   if (Build.VERSION.SDK_INT >= 29)
-                      startForeground(1, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
-                  else startForeground(1, n)
+                      startForeground(1, nb.build(), ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
+                  else startForeground(1, nb.build())
+                  try {
 
                   val prefs = getSharedPreferences("p", MODE_PRIVATE)
                   leadMs = prefs.getFloat("lead", 100f); aimFrac = prefs.getFloat("aim", 0.5f).coerceIn(0f, 1f)
@@ -223,7 +237,7 @@ jobs:
                   val data = dataExtra(i) ?: run { stopSelf(); return START_NOT_STICKY }
                   projection = mpm.getMediaProjection(i.getIntExtra("code", 0), data)
                   projection!!.registerCallback(object : MediaProjection.Callback() {
-                      override fun onStop() { stopSelf() }
+                      override fun onStop() { status("capture was stopped by the system or another app", true); stopSelf() }
                   }, bg)
 
                   guide = GuideView(this).also {
@@ -237,7 +251,22 @@ jobs:
                   reader = buildReader()
                   vd = projection!!.createVirtualDisplay("cap", capW, capH, resources.displayMetrics.densityDpi,
                       DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, reader!!.surface, null, bg)
+                  status("capture started %dx%d".format(capW, capH), true)
+                  } catch (e: Exception) {
+                      status("start failed: ${e.javaClass.simpleName} ${e.message}", true)
+                      ui.post { android.widget.Toast.makeText(this, "Start failed: ${e.message}", android.widget.Toast.LENGTH_LONG).show() }
+                      stopSelf()
+                  }
                   return START_NOT_STICKY
+              }
+
+              /** Shows the latest state in the notification and in the app, so it can be read without any overlay. */
+              private fun status(text: String, force: Boolean = false) {
+                  val now = SystemClock.elapsedRealtime()
+                  if (!force && now - lastStatusT < 1000) return
+                  lastStatusT = now
+                  getSharedPreferences("p", MODE_PRIVATE).edit().putString("status", text).apply()
+                  (getSystemService(NOTIFICATION_SERVICE) as NotificationManager).notify(1, nb.setContentText(text).build())
               }
 
               @Suppress("DEPRECATION")
@@ -421,7 +450,7 @@ jobs:
                   if (Build.VERSION.SDK_INT >= 26) v.vibrate(VibrationEffect.createOneShot(60, 255)) else v.vibrate(60)
               }
 
-              private fun publish(s: GuideState) { val f = frames; ui.post { guide?.let { it.state = s; it.frames = f; it.invalidate() } } }
+              private fun publish(s: GuideState) { val f = frames; status("f=$f ${s.debug}"); ui.post { guide?.let { it.state = s; it.frames = f; it.invalidate() } } }
 
               override fun onDestroy() {
                   vd?.release(); reader?.close(); projection?.stop()
