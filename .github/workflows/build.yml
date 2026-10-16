@@ -456,16 +456,29 @@ jobs:
                       val dot = Paint().apply { color = if (s.phase == 3) Color.RED else Color.WHITE }
                       cv.drawCircle(rx, cy, 6 * d, dot)
                   }
+                  // Reach line: the pole must be as long as the distance from its base to the anchor dot.
+                  // Kept thin so it doesn't hide the pole pixels the detector looks at.
+                  val ly = (s.ytop - 12) * sc
+                  val bx = s.baseX * sc; val ax = (s.baseX + s.aim) * sc
+                  thin.color = Color.argb(200, 255, 255, 255)
+                  cv.drawLine(bx, ly, ax, ly, thin)
+                  if (s.len > 0f) {
+                      thin.color = if (s.phase == 3) Color.RED else Color.rgb(0, 230, 0)
+                      cv.drawLine(bx, ly, (s.baseX + min(s.len, s.aim)) * sc, ly, thin)
+                  }
+                  cv.drawCircle(ax, ly, 7 * d, Paint().apply { color = Color.rgb(0, 230, 0) })
+
+                  // Lengths in dp so the numbers mean the same on any screen
+                  val need = (s.aim * sc / d).toInt(); val now = (s.len * sc / d).toInt()
                   val (msg, col) = when (s.phase) {
                       2 -> "RELEASE!" to Color.rgb(0, 255, 0)
                       3 -> "TOO LONG" to Color.rgb(255, 60, 60)
-                      1 -> "Hold… %d%%".format((100 * s.len / s.aim).toInt().coerceIn(0, 99)) to Color.WHITE
-                      else -> "" to Color.WHITE
+                      1 -> "Pole $now / $need" to Color.WHITE
+                      else -> "Pole needs $need" to Color.WHITE
                   }
-                  if (msg.isNotEmpty()) {
-                      txt.color = col; txt.textSize = 40 * d
-                      cv.drawText(msg, w / 2, h * 0.36f, txt)
-                  }
+                  txt.color = col; txt.textSize = (if (s.phase >= 2) 40 else 28) * d
+                  cv.drawText(msg, w / 2, h * 0.36f, txt)
+
                   if (s.phase == 2 || s.phase == 3) {
                       val p = Paint().apply { color = col; style = Paint.Style.STROKE; strokeWidth = 12 * d }
                       cv.drawRect(0f, 0f, w, h, p)
