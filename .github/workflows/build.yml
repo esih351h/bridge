@@ -119,6 +119,7 @@ jobs:
               private lateinit var aim: EditText
               private lateinit var beat: EditText
               private lateinit var autoBox: CheckBox
+              private lateinit var modeGroup: RadioGroup
               private lateinit var statusView: TextView
 
               override fun onCreate(b: Bundle?) {
@@ -134,6 +135,12 @@ jobs:
                   }
                   fun btn(t: String, f: () -> Unit) = Button(this).apply { text = t; setOnClickListener { f() } }
 
+                  root.addView(tv("What should it do?"))
+                  modeGroup = RadioGroup(this)
+                  modeGroup.addView(RadioButton(this).apply { text = "Bridge game (hold and release the pole)"; id = 101 })
+                  modeGroup.addView(RadioButton(this).apply { text = "Tower fight (Fight, Skip, OK again and again)"; id = 102 })
+                  modeGroup.check(if (prefs.getString("mode", "bridge") == "tower") 102 else 101)
+                  root.addView(modeGroup)
                   root.addView(tv("Reaction lead (ms): the release cue comes this much early to cover delay + your reaction. " +
                       "It also adjusts itself after every release, so it learns how late or early you usually are."))
                   lead = num(prefs.getFloat("lead", 100f)); root.addView(lead, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
@@ -143,7 +150,7 @@ jobs:
                   aim = num(prefs.getFloat("aim", 0.5f)); root.addView(aim, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
 
                   autoBox = CheckBox(this).apply {
-                      text = "Auto hold and release (needs the accessibility service)"; isChecked = prefs.getBoolean("auto", false)
+                      text = "Auto mode: taps for you (needs the accessibility service). Tower mode only taps when this is on."; isChecked = prefs.getBoolean("auto", false)
                   }
                   root.addView(autoBox)
                   root.addView(btn("Open accessibility settings") { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) })
@@ -160,7 +167,8 @@ jobs:
                       prefs.edit().putFloat("lead", lead.text.toString().toFloatOrNull() ?: 100f)
                           .putFloat("aim", aim.text.toString().toFloatOrNull() ?: 0.5f)
                           .putFloat("beat", beat.text.toString().toFloatOrNull() ?: 150f)
-                          .putBoolean("auto", autoBox.isChecked).apply()
+                          .putBoolean("auto", autoBox.isChecked)
+                          .putString("mode", if (modeGroup.checkedRadioButtonId == 102) "tower" else "bridge").apply()
                       val mpm = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
                       startActivityForResult(mpm.createScreenCaptureIntent(), 100)
                   })
@@ -250,6 +258,15 @@ jobs:
               private var autoEnabled = false
               @Volatile private var autoActive = false
               private var autoPressTs = 0L; private var autoBlockUntil = 0L; private var stable = 0
+              // "Tower" mode: Fight > Skip > OK
+              private var towerMode = false
+              @Volatile private var tClass = 0           // 0 waiting, 1 FIGHT, 2 SKIP, 3 OK
+              @Volatile private var tSince = 0L
+              private var towerPending = false
+              private var nextTapMs = 0L; private var pauseUntilMs = 0L
+              private var lastTapClass = 0; private var sameTap = 0; private var fights = 0
+              private val towerNames = arrayOf("waiting", "FIGHT", "SKIP", "OK")
+              private val towerCheck = Runnable { towerStep() }
               private var rateEst = 295f                // pole growth in capture px/s, learned from your holds
 
               // geometry smoothing / freezing while the pole grows
@@ -305,6 +322,7 @@ jobs:
                   leadMs = prefs.getFloat("lead", 100f); aimFrac = prefs.getFloat("aim", 0.5f).coerceIn(0f, 1f)
                   beatMs = prefs.getFloat("beat", 150f).coerceIn(0f, 400f)
                   autoEnabled = prefs.getBoolean("auto", false)
+                  towerMode = prefs.getString("mode", "bridge") == "tower"
                   tone = try { ToneGenerator(AudioManager.STREAM_MUSIC, 100) } catch (_: Exception) { null }
 
                   ht = HandlerThread("cap").also { it.start() }; bg = Handler(ht.looper)
@@ -373,6 +391,78 @@ jobs:
                   return r
               }
 
+              // ---------- tower mode: Fight > Skip > OK ----------
+              private fun analyzeTower(img: Image) {
+                  val W = img.width; val H = img.height
+                  val pl = img.planes[0]; val buf = pl.buffer; val rs = pl.rowStride
+                  fun px(x: Int, y: Int, k: Int) = buf.get(y * rs + x * 4 + k).toInt() and 255
+                  // share of pixels in a box (given as fractions of the screen) that pass a colour test
+                  fun frac(fx0: Float, fy0: Float, fx1: Float, fy1: Float, test: (Int, Int, Int) -> Boolean): Float {
+                      val x0 = (fx0 * W).toInt(); val x1 = min(W, (fx1 * W).toInt())
+                      val y0 = (fy0 * H).toInt(); val y1 = min(H, (fy1 * H).toInt())
+                      var hit = 0; var n = 0
+                      for (y in y0 until y1) for (x in x0 until x1) {
+                          n++
+                          if (test(px(x, y, if (swap) 2 else 0), px(x, y, 1), px(x, y, if (swap) 0 else 2))) hit++
+                      }
+                      return if (n == 0) 0f else hit.toFloat() / n
+                  }
+                  val goldHi = { r: Int, g: Int, b: Int -> r >= 170 && g in 100..210 && b <= 90 && r > g + 30 }
+                  val goldLo = { r: Int, g: Int, b: Int -> r >= 150 && g in 90..210 && b <= 100 && r > g + 25 }
+                  val fight = frac(0.447f, 0.868f, 0.527f, 0.924f, goldHi)      // bright "Fight" button
+                  val ok = frac(0.480f, 0.781f, 0.560f, 0.833f, goldHi)         // "OK" button of the reward box
+                  val skip = frac(0.939f, 0.465f, 0.969f, 0.528f, goldLo)       // "Skip" icon during a battle
+                  val pause = frac(0.939f, 0.300f, 0.969f, 0.363f, goldLo)      // "Pause" icon above it
+                  val top = frac(0.438f, 0.010f, 0.610f, 0.087f) { r, g, b -> max(r, max(g, b)) < 70 }   // dark battle bar
+                  val cls = when {
+                      ok >= 0.40f && fight < 0.2f -> 3
+                      fight >= 0.45f && ok <= 0.3f -> 1
+                      skip >= 0.08f && pause >= 0.06f && top >= 0.6f -> 2
+                      else -> 0
+                  }
+                  val now = SystemClock.elapsedRealtime()
+                  if (cls != tClass) { tClass = cls; tSince = now }
+                  scheduleTower(320)
+                  publish(GuideState(false, debug = "tower %s fights=%d auto=%s [fight %.2f ok %.2f skip %.2f pause %.2f]".format(
+                      towerNames[cls], fights, if (autoEnabled) "on" else "off", fight, ok, skip, pause)))
+              }
+
+              private fun scheduleTower(ms: Long) {
+                  if (!towerPending) { towerPending = true; bg.postDelayed(towerCheck, max(20L, ms)) }
+              }
+
+              /** Runs on a timer, so it still works when the screen is static and no new frames arrive. */
+              private fun towerStep() {
+                  towerPending = false
+                  val cls = tClass
+                  if (cls == 0) return
+                  val now = SystemClock.elapsedRealtime()
+                  if (now - tSince < 300) { scheduleTower(320 - (now - tSince)); return }   // wait until the screen is steady
+                  if (now < pauseUntilMs) { scheduleTower(500); return }
+                  if (now < nextTapMs) { scheduleTower(nextTapMs - now + 20); return }
+                  if (!autoEnabled) { scheduleTower(1000); return }
+                  tapTower(cls, now)
+                  scheduleTower(1200)   // if the same screen is still there afterwards, the next check may tap again (limited)
+              }
+
+              private fun tapTower(cls: Int, now: Long) {
+                  val svc = TapService.instance
+                  if (svc == null) {
+                      status("auto: turn on the Bridge Helper accessibility service", true)
+                      pauseUntilMs = now + 3000; return
+                  }
+                  if (cls == lastTapClass) sameTap++ else { lastTapClass = cls; sameTap = 1 }
+                  if (sameTap > 3) {
+                      autoEnabled = false; sameTap = 0; lastTapClass = 0
+                      status("tower: stuck on ${towerNames[cls]}, auto turned off", true); return
+                  }
+                  val (sw, sh) = screenSize()
+                  val l = max(sw, sh).toFloat(); val sm = min(sw, sh).toFloat()
+                  val (fx, fy) = when (cls) { 1 -> 0.487f to 0.894f; 2 -> 0.954f to 0.509f; else -> 0.520f to 0.807f }
+                  if (svc.tap(fx * l, fy * sm) && cls == 1) fights++
+                  nextTapMs = now + (if (cls == 3) 1500L else 2500L)
+              }
+
               // ---------- detection ----------
               /** Mask of pole-coloured pixels in the thin strip beside the platform edge (slightly dilated). */
               private class Ref(val x0: Int, val y0: Int, val cols: Int, val rows: Int, val bits: BooleanArray) {
@@ -383,6 +473,7 @@ jobs:
               }
 
               private fun analyze(img: Image) {
+                  if (towerMode) { analyzeTower(img); return }
                   val W = img.width; val H = img.height
                   val pl = img.planes[0]; val buf = pl.buffer; val rs = pl.rowStride
                   fun r(x: Int, y: Int) = buf.get(y * rs + x * 4 + (if (swap) 2 else 0)).toInt() and 255
@@ -759,6 +850,12 @@ jobs:
               override fun onUnbind(intent: Intent?): Boolean { instance = null; return super.onUnbind(intent) }
               override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
               override fun onInterrupt() { stroke = null }
+
+              /** A quick single tap at (x, y). */
+              fun tap(x: Float, y: Float): Boolean {
+                  val s = GestureDescription.StrokeDescription(Path().apply { moveTo(x, y) }, 0, 60)
+                  return dispatchGesture(GestureDescription.Builder().addStroke(s).build(), null, null)
+              }
 
               /** Presses at (x, y) and keeps holding until release() is called. */
               fun press(x: Float, y: Float): Boolean {
