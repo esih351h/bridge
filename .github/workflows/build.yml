@@ -69,8 +69,33 @@ jobs:
                   </activity>
                   <service android:name=".OverlayService" android:exported="false"
                       android:foregroundServiceType="mediaProjection" />
+                  <service android:name=".TapService" android:exported="true"
+                      android:label="Bridge Helper auto-tap"
+                      android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+                      <intent-filter>
+                          <action android:name="android.accessibilityservice.AccessibilityService" />
+                      </intent-filter>
+                      <meta-data android:name="android.accessibilityservice" android:resource="@xml/tap_service" />
+                  </service>
               </application>
           </manifest>
+          BH_EOF
+          mkdir -p "$(dirname app/src/main/res/xml/tap_service.xml)"
+          cat > app/src/main/res/xml/tap_service.xml <<'BH_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+              android:accessibilityEventTypes="typeWindowStateChanged"
+              android:accessibilityFeedbackType="feedbackGeneric"
+              android:canPerformGestures="true"
+              android:notificationTimeout="100"
+              android:description="@string/tap_desc" />
+          BH_EOF
+          mkdir -p "$(dirname app/src/main/res/values/strings.xml)"
+          cat > app/src/main/res/values/strings.xml <<'BH_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="tap_desc">Lets Bridge Helper press and release the screen for you in the mini game. Only used when Auto is switched on in the app.</string>
+          </resources>
           BH_EOF
           mkdir -p "$(dirname app/src/main/java/com/example/bridgehelper/MainActivity.kt)"
           cat > app/src/main/java/com/example/bridgehelper/MainActivity.kt <<'BH_EOF'
@@ -92,6 +117,8 @@ jobs:
           class MainActivity : Activity() {
               private lateinit var lead: EditText
               private lateinit var aim: EditText
+              private lateinit var beat: EditText
+              private lateinit var autoBox: CheckBox
               private lateinit var statusView: TextView
 
               override fun onCreate(b: Bundle?) {
@@ -107,12 +134,22 @@ jobs:
                   }
                   fun btn(t: String, f: () -> Unit) = Button(this).apply { text = t; setOnClickListener { f() } }
 
-                  root.addView(tv("Reaction lead (ms): the phone cues you this much earlier to cover capture + reaction delay. " +
-                      "If you release too late, raise it; too early, lower it."))
+                  root.addView(tv("Reaction lead (ms): the release cue comes this much early to cover delay + your reaction. " +
+                      "It also adjusts itself after every release, so it learns how late or early you usually are."))
                   lead = num(prefs.getFloat("lead", 100f)); root.addView(lead, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+                  root.addView(tv("Countdown beats: 3 evenly spaced beeps/buzzes, then release on the 4th beat. Spacing in ms (0 = off)."))
+                  beat = num(prefs.getFloat("beat", 150f)); root.addView(beat, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
                   root.addView(tv("Aim point on the next platform, 0.0 = near edge, 0.5 = middle, 1.0 = far edge."))
                   aim = num(prefs.getFloat("aim", 0.5f)); root.addView(aim, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
 
+                  autoBox = CheckBox(this).apply {
+                      text = "Auto hold and release (needs the accessibility service)"; isChecked = prefs.getBoolean("auto", false)
+                  }
+                  root.addView(autoBox)
+                  root.addView(btn("Open accessibility settings") { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) })
+                  root.addView(tv("For auto: open Installed apps (or Downloaded apps), tap Bridge Helper auto-tap and turn it on. " +
+                      "If it is greyed out: Settings > Apps > Bridge Helper > ⋮ > Allow restricted settings. " +
+                      "While it runs, the notification has an Auto on/off button."))
                   root.addView(btn("1. Grant overlay permission") {
                       startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
                   })
@@ -121,7 +158,9 @@ jobs:
                           Toast.makeText(this, "Grant overlay permission first", Toast.LENGTH_SHORT).show(); return@btn
                       }
                       prefs.edit().putFloat("lead", lead.text.toString().toFloatOrNull() ?: 100f)
-                          .putFloat("aim", aim.text.toString().toFloatOrNull() ?: 0.5f).apply()
+                          .putFloat("aim", aim.text.toString().toFloatOrNull() ?: 0.5f)
+                          .putFloat("beat", beat.text.toString().toFloatOrNull() ?: 150f)
+                          .putBoolean("auto", autoBox.isChecked).apply()
                       val mpm = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
                       startActivityForResult(mpm.createScreenCaptureIntent(), 100)
                   })
@@ -135,7 +174,11 @@ jobs:
                   setContentView(ScrollView(this).apply { addView(root) })
               }
 
-              override fun onResume() { super.onResume(); showStatus() }
+              override fun onResume() {
+                  super.onResume(); showStatus()
+                  // the service may have learned a better lead while this screen was in the background
+                  lead.setText(getSharedPreferences("p", MODE_PRIVATE).getFloat("lead", 100f).toInt().toString())
+              }
 
               private fun showStatus() {
                   statusView.text = getSharedPreferences("p", MODE_PRIVATE).getString("status", "not started")
@@ -161,10 +204,13 @@ jobs:
           import android.content.pm.ServiceInfo
           import android.content.res.Configuration
           import android.graphics.*
+          import android.graphics.drawable.Icon
           import android.hardware.display.DisplayManager
           import android.hardware.display.VirtualDisplay
           import android.media.Image
+          import android.media.AudioManager
           import android.media.ImageReader
+          import android.media.ToneGenerator
           import android.media.projection.MediaProjection
           import android.media.projection.MediaProjectionManager
           import android.os.*
@@ -196,6 +242,15 @@ jobs:
               @Volatile private var swap = false   // some devices deliver red/blue swapped
               private var capW = 1; private var capH = 1
               private var leadMs = 100f; private var aimFrac = 0.5f
+              private var beatMs = 150f                 // spacing of the countdown beats, 0 = off
+              private val played = BooleanArray(4)      // which countdown beats were already given this hold
+              private var lastRate = 0f
+              private var tone: ToneGenerator? = null
+              // optional auto mode (presses/releases through TapService)
+              private var autoEnabled = false
+              @Volatile private var autoActive = false
+              private var autoPressTs = 0L; private var autoBlockUntil = 0L; private var stable = 0
+              private var rateEst = 295f                // pole growth in capture px/s, learned from your holds
 
               // geometry smoothing / freezing while the pole grows
               private val hist = ArrayList<FloatArray>()
@@ -224,12 +279,23 @@ jobs:
                   else i.getParcelableExtra("data")
 
               override fun onStartCommand(i: Intent?, f: Int, id: Int): Int {
+                  if (i?.action == "TOGGLE_AUTO") {
+                      if (!::nb.isInitialized) { stopSelf(); return START_NOT_STICKY }
+                      autoEnabled = !autoEnabled
+                      if (!autoEnabled) autoRelease()
+                      status("auto " + (if (autoEnabled) "ON" else "OFF"), true)
+                      return START_NOT_STICKY
+                  }
                   if (i == null || projection != null) return START_NOT_STICKY
                   val ch = "ov"
                   (getSystemService(NOTIFICATION_SERVICE) as NotificationManager)
                       .createNotificationChannel(NotificationChannel(ch, "Overlay", NotificationManager.IMPORTANCE_LOW))
                   nb = Notification.Builder(this, ch).setContentTitle("Bridge Helper running")
                       .setContentText("starting…").setSmallIcon(android.R.drawable.ic_menu_compass)
+                      .addAction(Notification.Action.Builder(
+                          Icon.createWithResource(this, android.R.drawable.ic_media_pause), "Auto on/off",
+                          PendingIntent.getService(this, 1, Intent(this, OverlayService::class.java).setAction("TOGGLE_AUTO"),
+                              PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)).build())
                   if (Build.VERSION.SDK_INT >= 29)
                       startForeground(1, nb.build(), ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
                   else startForeground(1, nb.build())
@@ -237,6 +303,9 @@ jobs:
 
                   val prefs = getSharedPreferences("p", MODE_PRIVATE)
                   leadMs = prefs.getFloat("lead", 100f); aimFrac = prefs.getFloat("aim", 0.5f).coerceIn(0f, 1f)
+                  beatMs = prefs.getFloat("beat", 150f).coerceIn(0f, 400f)
+                  autoEnabled = prefs.getBoolean("auto", false)
+                  tone = try { ToneGenerator(AudioManager.STREAM_MUSIC, 100) } catch (_: Exception) { null }
 
                   ht = HandlerThread("cap").also { it.start() }; bg = Handler(ht.looper)
                   val mpm = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
@@ -441,17 +510,29 @@ jobs:
                   }
                   val aimNow = chooseAim(m)
                   val mTop = m[3].toInt(); val mBase = m[2].toInt()
+                  // a bridge lying across the gap means the last round is still playing out
+                  fun bridgePresent(): Boolean {
+                      val bx0 = mBase + 3; val bx1 = right[0] - 3
+                      if (bx1 - bx0 < 6) return false
+                      var cols = 0
+                      for (x in bx0..bx1) {
+                          var hit = false
+                          for (y in max(0, mTop - 4)..min(H - 1, mTop + 1)) if (pole(x, y)) { hit = true; break }
+                          if (hit) cols++
+                      }
+                      return cols > (bx1 - bx0) * 0.4f
+                  }
                   fun idleState(len: Float) = GuideState(true, m[3], m[2], m[0] + 0.2f * m[1], m[0] + 0.8f * m[1], aimNow, 0f, 0, W,
                       "gap=%.0f w=%.0f dot=%s tip=%.0f".format(m[0], m[1], if (m[4] > 0f) "yes" else "no", len))
 
                   // 4) is a pole starting to grow? (needs the tip to rise over several frames in a row)
                   val cur = ref
                   if (cur == null) {
-                      ref = buildRef(mTop, mBase); arm = 0; armPrev = 0f
+                      ref = buildRef(mTop, mBase); arm = 0; armPrev = 0f; stable = 0
                       publish(idleState(0f)); return
                   }
                   if (ts < cooldownUntil) {
-                      ref = buildRef(mTop, mBase); arm = 0; armPrev = 0f
+                      ref = buildRef(mTop, mBase); arm = 0; armPrev = 0f; stable = 0
                       publish(idleState(0f)); return
                   }
                   val len = tip(mTop, mBase, cur)
@@ -468,6 +549,16 @@ jobs:
                   } else { arm = 0; armPrev = 0f }
                   if (arm == 0) ref = buildRef(mTop, mBase)   // absorb static clutter, but not a pole that is rising
                   resetHold()
+                  // optional auto mode: press once the scene has been calm for a moment; the release happens in hold()
+                  if (autoEnabled) {
+                      if (autoActive) {
+                          if (!fValid && ts - autoPressTs > 1_500_000_000L) { autoRelease(); autoBlockUntil = ts + 3_000_000_000L }
+                      } else {
+                          val ready = arm == 0 && len < minLen && ts >= autoBlockUntil && !bridgePresent()
+                          stable = if (ready) stable + 1 else 0
+                          if (stable >= 15) { stable = 0; startAuto(ts, aimNow) }
+                      }
+                  }
                   publish(idleState(len))
               }
 
@@ -477,9 +568,9 @@ jobs:
 
               private fun resetGeom() { hist.clear(); ref = null; arm = 0; armPrev = 0f }
 
-              private fun resetHold() { tsN.clear(); lsN.clear(); cued = false }
+              private fun resetHold() { tsN.clear(); lsN.clear(); cued = false; played.fill(false) }
 
-              private fun dropHold() { fValid = false; resetHold(); ref = null; arm = 0; armPrev = 0f }
+              private fun dropHold() { autoRelease(); fValid = false; resetHold(); ref = null; arm = 0; armPrev = 0f }
 
               /** Called for every frame while the pole is growing. */
               private fun hold(ts: Long, len: Float) {
@@ -487,7 +578,7 @@ jobs:
                   val lo = fGap + 0.2f * fPw; val hi = fGap + 0.8f * fPw
                   fun idle(msg: String) = publish(GuideState(true, fTop.toFloat(), fBase.toFloat(), lo, hi, aim, 0f, 0, fW, msg))
                   // the tip suddenly dropped: the pole was released and is falling
-                  if (lsN.isNotEmpty() && len < lsN.last() - 8f) { dropHold(); cooldownUntil = ts + 800_000_000L; idle("released"); return }
+                  if (lsN.isNotEmpty() && len < lsN.last() - 8f) { learnLead(lsN.last(), aim); dropHold(); cooldownUntil = ts + 800_000_000L; idle("released"); return }
                   // no growth for a while, or held far too long: stop trusting this "pole"
                   if (len > maxLen + 2f) { maxLen = len; lastGrowTs = ts }
                   if (ts - lastGrowTs > 700_000_000L || ts - holdStartTs > 4_000_000_000L) { dropHold(); idle("lost pole"); return }
@@ -504,21 +595,68 @@ jobs:
                   }
                   val remaining = aim - len
                   val due = remaining <= 0f || (rate > 1f && remaining <= rate * leadMs / 1000f)
+                  lastRate = rate
                   val phase = when { len > hi -> 3; due -> 2; else -> 1 }
-                  if (phase == 2 && !cued) { cued = true; vibrate() }
+                  // countdown: 3 evenly spaced beats, then the release cue is the 4th beat
+                  if (beatMs > 0f && rate > 1f && !due && !autoActive) {
+                      val after = remaining / rate * 1000f - leadMs      // ms until the release cue
+                      for (k in 1..3) if (!played[k] && after > 0f && after <= k * beatMs) {
+                          for (j in k..3) played[j] = true
+                          vibrate(25, 120); beep(false)
+                          break
+                      }
+                  }
+                  if (phase == 2 && !cued) { cued = true; if (autoActive) autoRelease() else { vibrate(80, 255); beep(true) } }
+                  if (phase == 3 && autoActive) autoRelease()
                   publish(GuideState(true, fTop.toFloat(), fBase.toFloat(), lo, hi, aim, len, phase, fW,
-                      "gap=%.0f w=%.0f len=%.0f rate=%.0f/s".format(fGap, fPw, len, rate)))
+                      "gap=%.0f w=%.0f len=%.0f rate=%.0f/s lead=%.0f%s".format(fGap, fPw, len, rate, leadMs, if (autoActive) " AUTO" else "")))
+              }
+
+              /** After a release: how late (+) or early (-) was it compared to the aim point? Nudge the lead to cancel it. */
+              private fun learnLead(finalLen: Float, aim: Float) {
+                  if (lastRate < 50f) return
+                  val timeErrMs = (finalLen - aim) / lastRate * 1000f
+                  if (abs(timeErrMs) > 500f) return                  // ignore wild outliers (e.g. you let go on purpose)
+                  if (lastRate in 100f..1000f) rateEst = rateEst * 0.7f + lastRate * 0.3f
+                  leadMs = (leadMs + 0.4f * timeErrMs).coerceIn(30f, 400f)
+                  getSharedPreferences("p", MODE_PRIVATE).edit().putFloat("lead", leadMs).apply()
+              }
+
+              private fun autoRelease() { if (autoActive) { autoActive = false; TapService.instance?.release() } }
+
+              private fun startAuto(ts: Long, aim: Float) {
+                  val svc = TapService.instance
+                  if (svc == null) {
+                      status("auto: turn on the Bridge Helper accessibility service", true)
+                      autoBlockUntil = ts + 3_000_000_000L; return
+                  }
+                  val (sw, sh) = screenSize()
+                  // press in empty sky on the right: "press anywhere" works in the game and misses the result-screen buttons
+                  if (svc.press(max(sw, sh) * 0.92f, min(sw, sh) * 0.55f)) {
+                      autoActive = true; autoPressTs = ts
+                      // the hero hides the first ~50px of pole, so for short aims release by time; otherwise only a safety net
+                      val ms = aim / rateEst * 1000f
+                      val delay = if (aim < 100f) ms - 50f else ms + 400f
+                      bg.postDelayed({ if (autoActive && ts == autoPressTs) autoRelease() }, max(30f, delay).toLong())
+                  }
+              }
+
+              private fun beep(release: Boolean) {
+                  try { tone?.startTone(if (release) ToneGenerator.TONE_DTMF_9 else ToneGenerator.TONE_DTMF_1, if (release) 150 else 45) }
+                  catch (_: Exception) { }
               }
 
               @Suppress("DEPRECATION")
-              private fun vibrate() {
+              private fun vibrate(ms: Long = 60, amp: Int = 255) {
                   val v = getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
-                  if (Build.VERSION.SDK_INT >= 26) v.vibrate(VibrationEffect.createOneShot(60, 255)) else v.vibrate(60)
+                  if (Build.VERSION.SDK_INT >= 26) v.vibrate(VibrationEffect.createOneShot(ms, amp)) else v.vibrate(ms)
               }
 
               private fun publish(s: GuideState) { val f = frames; status("f=$f ${s.debug}"); ui.post { guide?.let { it.state = s; it.frames = f; it.invalidate() } } }
 
               override fun onDestroy() {
+                  autoRelease()
+                  tone?.release()
                   vd?.release(); reader?.close(); projection?.stop()
                   guide?.let { runCatching { wm.removeView(it) } }
                   if (::ht.isInitialized) ht.quitSafely()
@@ -597,6 +735,50 @@ jobs:
                       stroke(12 * d, c)
                       cv.drawRect(0f, 0f, w, h, paint)
                   }
+              }
+          }
+          BH_EOF
+          mkdir -p "$(dirname app/src/main/java/com/example/bridgehelper/TapService.kt)"
+          cat > app/src/main/java/com/example/bridgehelper/TapService.kt <<'BH_EOF'
+          package com.example.bridgehelper
+
+          import android.accessibilityservice.AccessibilityService
+          import android.accessibilityservice.GestureDescription
+          import android.content.Intent
+          import android.graphics.Path
+          import android.view.accessibility.AccessibilityEvent
+
+          /** Does nothing by itself: OverlayService asks it to press and release the screen when Auto is on. */
+          class TapService : AccessibilityService() {
+              companion object { @Volatile var instance: TapService? = null }
+
+              private var stroke: GestureDescription.StrokeDescription? = null
+              private var px = 0f; private var py = 0f
+
+              override fun onServiceConnected() { instance = this }
+              override fun onUnbind(intent: Intent?): Boolean { instance = null; return super.onUnbind(intent) }
+              override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
+              override fun onInterrupt() { stroke = null }
+
+              /** Presses at (x, y) and keeps holding until release() is called. */
+              fun press(x: Float, y: Float): Boolean {
+                  px = x; py = y
+                  val s = GestureDescription.StrokeDescription(Path().apply { moveTo(x, y) }, 0, 80, true)
+                  stroke = s
+                  val ok = dispatchGesture(GestureDescription.Builder().addStroke(s).build(),
+                      object : AccessibilityService.GestureResultCallback() {
+                          override fun onCancelled(gestureDescription: GestureDescription?) { if (stroke === s) stroke = null }
+                      }, null)
+                  if (!ok) stroke = null
+                  return ok
+              }
+
+              /** Lifts the finger that press() put down. */
+              fun release() {
+                  val s = stroke ?: return
+                  stroke = null
+                  val c = s.continueStroke(Path().apply { moveTo(px, py) }, 0, 20, false)
+                  dispatchGesture(GestureDescription.Builder().addStroke(c).build(), null, null)
               }
           }
           BH_EOF
