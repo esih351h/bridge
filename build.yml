@@ -1,0 +1,968 @@
+name: Build APK
+on:
+  push:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.7
+      - name: Create project files
+        run: |
+          mkdir -p "$(dirname settings.gradle.kts)"
+          cat > settings.gradle.kts <<'BH_EOF'
+          pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
+          dependencyResolutionManagement { repositories { google(); mavenCentral() } }
+          rootProject.name = "BridgeHelper"
+          include(":app")
+          BH_EOF
+          mkdir -p "$(dirname build.gradle.kts)"
+          cat > build.gradle.kts <<'BH_EOF'
+          plugins {
+              id("com.android.application") version "8.5.2" apply false
+              id("org.jetbrains.kotlin.android") version "1.9.24" apply false
+          }
+          BH_EOF
+          mkdir -p "$(dirname app/build.gradle.kts)"
+          cat > app/build.gradle.kts <<'BH_EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+          android {
+              namespace = "com.example.bridgehelper"
+              compileSdk = 34
+              defaultConfig {
+                  applicationId = "com.example.bridgehelper"
+                  minSdk = 26
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+              compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
+              kotlinOptions { jvmTarget = "17" }
+          }
+          BH_EOF
+          mkdir -p "$(dirname app/src/main/AndroidManifest.xml)"
+          cat > app/src/main/AndroidManifest.xml <<'BH_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+              <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+              <uses-permission android:name="android.permission.VIBRATE" />
+              <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+              <application android:label="Bridge Helper" android:theme="@android:style/Theme.Material.Light.DarkActionBar">
+                  <activity android:name=".MainActivity" android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+                  <service android:name=".OverlayService" android:exported="false"
+                      android:foregroundServiceType="mediaProjection" />
+                  <service android:name=".TapService" android:exported="true"
+                      android:label="Bridge Helper auto-tap"
+                      android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+                      <intent-filter>
+                          <action android:name="android.accessibilityservice.AccessibilityService" />
+                      </intent-filter>
+                      <meta-data android:name="android.accessibilityservice" android:resource="@xml/tap_service" />
+                  </service>
+              </application>
+          </manifest>
+          BH_EOF
+          mkdir -p "$(dirname app/src/main/res/xml/tap_service.xml)"
+          cat > app/src/main/res/xml/tap_service.xml <<'BH_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+              android:accessibilityEventTypes="typeWindowStateChanged"
+              android:accessibilityFeedbackType="feedbackGeneric"
+              android:canPerformGestures="true"
+              android:notificationTimeout="100"
+              android:description="@string/tap_desc" />
+          BH_EOF
+          mkdir -p "$(dirname app/src/main/res/values/strings.xml)"
+          cat > app/src/main/res/values/strings.xml <<'BH_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <resources>
+              <string name="tap_desc">Lets Bridge Helper press and release the screen for you in the mini game. Only used when Auto is switched on in the app.</string>
+          </resources>
+          BH_EOF
+          mkdir -p "$(dirname app/src/main/java/com/example/bridgehelper/MainActivity.kt)"
+          cat > app/src/main/java/com/example/bridgehelper/MainActivity.kt <<'BH_EOF'
+          package com.example.bridgehelper
+
+          import android.Manifest
+          import android.app.Activity
+          import android.content.Intent
+          import android.media.projection.MediaProjectionManager
+          import android.net.Uri
+          import android.os.Build
+          import android.os.Bundle
+          import android.provider.Settings
+          import android.text.InputType
+          import android.view.ViewGroup.LayoutParams.MATCH_PARENT
+          import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
+          import android.widget.*
+
+          class MainActivity : Activity() {
+              private lateinit var lead: EditText
+              private lateinit var aim: EditText
+              private lateinit var beat: EditText
+              private lateinit var autoBox: CheckBox
+              private lateinit var modeGroup: RadioGroup
+              private lateinit var statusView: TextView
+
+              override fun onCreate(b: Bundle?) {
+                  super.onCreate(b)
+                  if (Build.VERSION.SDK_INT >= 33)
+                      requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
+                  val prefs = getSharedPreferences("p", MODE_PRIVATE)
+                  val pad = (16 * resources.displayMetrics.density).toInt()
+                  val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(pad, pad, pad, pad) }
+                  fun tv(t: String) = TextView(this).apply { text = t; setPadding(0, pad / 2, 0, pad / 2) }
+                  fun num(v: Float) = EditText(this).apply {
+                      inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL; setText(v.toString())
+                  }
+                  fun btn(t: String, f: () -> Unit) = Button(this).apply { text = t; setOnClickListener { f() } }
+
+                  root.addView(tv("What should it do?"))
+                  modeGroup = RadioGroup(this)
+                  modeGroup.addView(RadioButton(this).apply { text = "Bridge game (hold and release the pole)"; id = 101 })
+                  modeGroup.addView(RadioButton(this).apply { text = "Tower fight (Fight, Skip, OK again and again)"; id = 102 })
+                  modeGroup.check(if (prefs.getString("mode", "bridge") == "tower") 102 else 101)
+                  root.addView(modeGroup)
+                  root.addView(tv("Reaction lead (ms): the release cue comes this much early to cover delay + your reaction. " +
+                      "It also adjusts itself after every release, so it learns how late or early you usually are."))
+                  lead = num(prefs.getFloat("lead", 100f)); root.addView(lead, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+                  root.addView(tv("Countdown beats: 3 evenly spaced beeps/buzzes, then release on the 4th beat. Spacing in ms (0 = off)."))
+                  beat = num(prefs.getFloat("beat", 150f)); root.addView(beat, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+                  root.addView(tv("Aim point on the next platform, 0.0 = near edge, 0.5 = middle, 1.0 = far edge."))
+                  aim = num(prefs.getFloat("aim", 0.5f)); root.addView(aim, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+
+                  autoBox = CheckBox(this).apply {
+                      text = "Auto mode: taps for you (needs the accessibility service). Tower mode only taps when this is on."; isChecked = prefs.getBoolean("auto", false)
+                  }
+                  root.addView(autoBox)
+                  root.addView(btn("Open accessibility settings") { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) })
+                  root.addView(tv("For auto: open Installed apps (or Downloaded apps), tap Bridge Helper auto-tap and turn it on. " +
+                      "If it is greyed out: Settings > Apps > Bridge Helper > ⋮ > Allow restricted settings. " +
+                      "While it runs, the notification has an Auto on/off button."))
+                  root.addView(btn("1. Grant overlay permission") {
+                      startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
+                  })
+                  root.addView(btn("2. Start auto-detect") {
+                      if (!Settings.canDrawOverlays(this)) {
+                          Toast.makeText(this, "Grant overlay permission first", Toast.LENGTH_SHORT).show(); return@btn
+                      }
+                      prefs.edit().putFloat("lead", lead.text.toString().toFloatOrNull() ?: 100f)
+                          .putFloat("aim", aim.text.toString().toFloatOrNull() ?: 0.5f)
+                          .putFloat("beat", beat.text.toString().toFloatOrNull() ?: 150f)
+                          .putBoolean("auto", autoBox.isChecked)
+                          .putString("mode", if (modeGroup.checkedRadioButtonId == 102) "tower" else "bridge").apply()
+                      val mpm = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+                      startActivityForResult(mpm.createScreenCaptureIntent(), 100)
+                  })
+                  root.addView(btn("Stop") { stopService(Intent(this, OverlayService::class.java)) })
+                  root.addView(tv("Status (also shown in the notification while it runs):"))
+                  statusView = TextView(this).apply { text = prefs.getString("status", "not started") }
+                  root.addView(statusView)
+                  root.addView(btn("Refresh status") { showStatus() })
+                  root.addView(tv("Choose \"Entire screen\" if asked what to share. Then open the game. The app finds the platforms, " +
+                      "marks the landing zone, vibrates when to let go, and shows RELEASE / TOO LONG on screen."))
+                  setContentView(ScrollView(this).apply { addView(root) })
+              }
+
+              override fun onResume() {
+                  super.onResume(); showStatus()
+                  // the service may have learned a better lead while this screen was in the background
+                  lead.setText(getSharedPreferences("p", MODE_PRIVATE).getFloat("lead", 100f).toInt().toString())
+              }
+
+              private fun showStatus() {
+                  statusView.text = getSharedPreferences("p", MODE_PRIVATE).getString("status", "not started")
+              }
+
+              @Deprecated("Deprecated in Java")
+              override fun onActivityResult(req: Int, res: Int, data: Intent?) {
+                  super.onActivityResult(req, res, data)
+                  if (req == 100 && res == RESULT_OK && data != null) {
+                      startForegroundService(Intent(this, OverlayService::class.java)
+                          .putExtra("code", res).putExtra("data", data))
+                  }
+              }
+          }
+          BH_EOF
+          mkdir -p "$(dirname app/src/main/java/com/example/bridgehelper/OverlayService.kt)"
+          cat > app/src/main/java/com/example/bridgehelper/OverlayService.kt <<'BH_EOF'
+          package com.example.bridgehelper
+
+          import android.app.*
+          import android.content.Context
+          import android.content.Intent
+          import android.content.pm.ServiceInfo
+          import android.content.res.Configuration
+          import android.graphics.*
+          import android.graphics.drawable.Icon
+          import android.hardware.display.DisplayManager
+          import android.hardware.display.VirtualDisplay
+          import android.media.Image
+          import android.media.AudioManager
+          import android.media.ImageReader
+          import android.media.ToneGenerator
+          import android.media.projection.MediaProjection
+          import android.media.projection.MediaProjectionManager
+          import android.os.*
+          import android.util.DisplayMetrics
+          import android.view.*
+          import kotlin.math.abs
+          import kotlin.math.max
+          import kotlin.math.min
+
+          /** phase: 0 idle, 1 holding, 2 release now, 3 too long */
+          class GuideState(
+              val ok: Boolean, val ytop: Float = 0f, val baseX: Float = 0f, val winLo: Float = 0f,
+              val winHi: Float = 0f, val aim: Float = 0f, val len: Float = 0f, val phase: Int = 0,
+              val capW: Int = 1, val debug: String = ""
+          )
+
+          class OverlayService : Service() {
+              private lateinit var wm: WindowManager
+              private var projection: MediaProjection? = null
+              private var vd: VirtualDisplay? = null
+              private var reader: ImageReader? = null
+              private lateinit var ht: HandlerThread
+              private lateinit var bg: Handler
+              private val ui = Handler(Looper.getMainLooper())
+              private var guide: GuideView? = null
+              @Volatile private var frames = 0
+              private lateinit var nb: Notification.Builder
+              private var lastStatusT = 0L
+              @Volatile private var swap = false   // some devices deliver red/blue swapped
+              private var capW = 1; private var capH = 1
+              private var leadMs = 100f; private var aimFrac = 0.5f
+              private var beatMs = 150f                 // spacing of the countdown beats, 0 = off
+              private val played = BooleanArray(4)      // which countdown beats were already given this hold
+              private var lastRate = 0f
+              private var tone: ToneGenerator? = null
+              // optional auto mode (presses/releases through TapService)
+              private var autoEnabled = false
+              @Volatile private var autoActive = false
+              private var autoPressTs = 0L; private var autoBlockUntil = 0L; private var stable = 0
+              // "Tower" mode: Fight > Skip > OK
+              private var towerMode = false
+              @Volatile private var tClass = 0           // 0 waiting, 1 FIGHT, 2 SKIP, 3 OK
+              @Volatile private var tSince = 0L
+              private var towerPending = false
+              private var nextTapMs = 0L; private var pauseUntilMs = 0L
+              private var lastTapClass = 0; private var sameTap = 0; private var fights = 0
+              @Volatile private var tTx = 0f; @Volatile private var tTy = 0f   // where to tap, as fractions of the screen
+              private val towerNames = arrayOf("waiting", "FIGHT", "SKIP", "OK")
+              private val towerCheck = Runnable { towerStep() }
+              private var autoWhy = ""
+              private var rateEst = 295f                // pole growth in capture px/s, learned from your holds
+              private var lastStableResetTime: Long? = null
+
+              // geometry smoothing / freezing while the pole grows
+              private val hist = ArrayList<FloatArray>()
+              private var fValid = false; private var fTop = 0; private var fBase = 0
+              private var fGap = 0f; private var fPw = 0f; private var fW = 1; private var fAim = 0f
+              // pole growth samples
+              private val tsN = ArrayList<Float>(); private val lsN = ArrayList<Float>()
+              private var t0 = 0L; private var cued = false
+              // pole tracking: reference of "pole-blue" clutter seen before the press, and arming logic
+              private var ref: Ref? = null; private var fRef: Ref? = null
+              private var arm = 0; private var armPrev = 0f
+              private var fSy = 0; private var fSy2 = 0
+              private var maxLen = 0f; private var lastGrowTs = 0L; private var holdStartTs = 0L
+              private var cooldownUntil = 0L   // ignore "new poles" briefly after a release (the falling pole looks like one)
+
+              override fun onBind(i: Intent?): IBinder? = null
+
+              override fun onCreate() {
+                  super.onCreate()
+                  wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+              }
+
+              @Suppress("DEPRECATION")
+              private fun dataExtra(i: Intent): Intent? =
+                  if (Build.VERSION.SDK_INT >= 33) i.getParcelableExtra("data", Intent::class.java)
+                  else i.getParcelableExtra("data")
+
+              override fun onStartCommand(i: Intent?, f: Int, id: Int): Int {
+                  if (i?.action == "TOGGLE_AUTO") {
+                      if (!::nb.isInitialized) { stopSelf(); return START_NOT_STICKY }
+                      autoEnabled = !autoEnabled
+                      if (!autoEnabled) autoRelease()
+                      status("auto " + (if (autoEnabled) "ON" else "OFF"), true)
+                      return START_NOT_STICKY
+                  }
+                  if (i == null || projection != null) return START_NOT_STICKY
+                  val ch = "ov"
+                  (getSystemService(NOTIFICATION_SERVICE) as NotificationManager)
+                      .createNotificationChannel(NotificationChannel(ch, "Overlay", NotificationManager.IMPORTANCE_LOW))
+                  nb = Notification.Builder(this, ch).setContentTitle("Bridge Helper running")
+                      .setContentText("starting…").setSmallIcon(android.R.drawable.ic_menu_compass)
+                      .addAction(Notification.Action.Builder(
+                          Icon.createWithResource(this, android.R.drawable.ic_media_pause), "Auto on/off",
+                          PendingIntent.getService(this, 1, Intent(this, OverlayService::class.java).setAction("TOGGLE_AUTO"),
+                              PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)).build())
+                  if (Build.VERSION.SDK_INT >= 29)
+                      startForeground(1, nb.build(), ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
+                  else startForeground(1, nb.build())
+                  try {
+
+                  val prefs = getSharedPreferences("p", MODE_PRIVATE)
+                  leadMs = prefs.getFloat("lead", 100f); aimFrac = prefs.getFloat("aim", 0.5f).coerceIn(0f, 1f)
+                  beatMs = prefs.getFloat("beat", 150f).coerceIn(0f, 400f)
+                  autoEnabled = prefs.getBoolean("auto", false)
+                  towerMode = prefs.getString("mode", "bridge") == "tower"
+                  tone = try { ToneGenerator(AudioManager.STREAM_MUSIC, 100) } catch (_: Exception) { null }
+
+                  ht = HandlerThread("cap").also { it.start() }; bg = Handler(ht.looper)
+                  val mpm = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+                  val data = dataExtra(i) ?: run { stopSelf(); return START_NOT_STICKY }
+                  projection = mpm.getMediaProjection(i.getIntExtra("code", 0), data)
+                  projection!!.registerCallback(object : MediaProjection.Callback() {
+                      override fun onStop() { status("capture was stopped by the system or another app", true); stopSelf() }
+                  }, bg)
+
+                  guide = GuideView(this).also {
+                      val lp = WindowManager.LayoutParams(
+                          WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT,
+                          WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                          WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                              WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS,
+                          PixelFormat.TRANSLUCENT)
+                      if (Build.VERSION.SDK_INT >= 30)
+                          lp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+                      else if (Build.VERSION.SDK_INT >= 28)
+                          lp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+                      wm.addView(it, lp)
+                  }
+                  reader = buildReader()
+                  vd = projection!!.createVirtualDisplay("cap", capW, capH, resources.displayMetrics.densityDpi,
+                      DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, reader!!.surface, null, bg)
+                  status("capture started %dx%d".format(capW, capH), true)
+                  } catch (e: Exception) {
+                      status("start failed: ${e.javaClass.simpleName} ${e.message}", true)
+                      ui.post { android.widget.Toast.makeText(this, "Start failed: ${e.message}", android.widget.Toast.LENGTH_LONG).show() }
+                      stopSelf()
+                  }
+                  return START_NOT_STICKY
+              }
+
+              /** Shows the latest state in the notification and in the app, so it can be read without any overlay. */
+              private fun status(text: String, force: Boolean = false) {
+                  val now = SystemClock.elapsedRealtime()
+                  if (!force && now - lastStatusT < 1000) return
+                  lastStatusT = now
+                  getSharedPreferences("p", MODE_PRIVATE).edit().putString("status", text).apply()
+                  (getSystemService(NOTIFICATION_SERVICE) as NotificationManager).notify(1, nb.setContentText(text).build())
+              }
+
+              @Suppress("DEPRECATION")
+              private fun screenSize(): Pair<Int, Int> {
+                  val dm = getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
+                  val m = DisplayMetrics()
+                  dm.getDisplay(Display.DEFAULT_DISPLAY).getRealMetrics(m)
+                  return m.widthPixels to m.heightPixels
+              }
+
+              private fun buildReader(): ImageReader {
+                  val (sw, sh) = screenSize()
+                  val long = max(sw, sh); val short = min(sw, sh)   // the game is landscape
+                  capW = min(long, 640); capH = short * capW / long
+                  val r = ImageReader.newInstance(capW, capH, PixelFormat.RGBA_8888, 2)
+                  r.setOnImageAvailableListener({ rd ->
+                      val img = rd.acquireLatestImage()
+                      if (img != null) {
+                          try { frames++; analyze(img) }
+                          catch (e: Exception) { publish(GuideState(false, debug = "error: ${e.javaClass.simpleName} ${e.message}")) }
+                          finally { img.close() }
+                      }
+                  }, bg)
+                  return r
+              }
+
+              // ---------- tower mode: Fight > Skip > OK ----------
+              private class Blob(val xc: Float, val yc: Float, val h: Float, val w: Float, val fill: Float)
+
+              private fun analyzeTower(img: Image) {
+                  val W = img.width; val H = img.height
+                  val pl = img.planes[0]; val buf = pl.buffer; val rs = pl.rowStride
+                  fun px(x: Int, y: Int, k: Int) = buf.get(y * rs + x * 4 + k).toInt() and 255
+                  fun gold(x: Int, y: Int): Boolean {
+                      val r = px(x, y, if (swap) 2 else 0); val g = px(x, y, 1); val b = px(x, y, if (swap) 0 else 2)
+                      return r >= 150 && g in 85..215 && b <= 115 && r > g + 25
+                  }
+                  // share of pixels in a box (fractions of the screen) that are gold
+                  fun goldFrac(fx0: Float, fy0: Float, fx1: Float, fy1: Float): Float {
+                      val x0 = (fx0 * W).toInt(); val x1 = min(W, (fx1 * W).toInt())
+                      val y0 = (fy0 * H).toInt(); val y1 = min(H, (fy1 * H).toInt())
+                      var hit = 0; var n = 0
+                      for (y in y0 until y1) for (x in x0 until x1) { n++; if (gold(x, y)) hit++ }
+                      return if (n == 0) 0f else hit.toFloat() / n
+                  }
+                  fun darkFrac(fx0: Float, fy0: Float, fx1: Float, fy1: Float): Float {
+                      val x0 = (fx0 * W).toInt(); val x1 = min(W, (fx1 * W).toInt())
+                      val y0 = (fy0 * H).toInt(); val y1 = min(H, (fy1 * H).toInt())
+                      var hit = 0; var n = 0
+                      for (y in y0 until y1) for (x in x0 until x1) {
+                          n++
+                          if (max(px(x, y, 0), max(px(x, y, 1), px(x, y, 2))) < 70) hit++
+                      }
+                      return if (n == 0) 0f else hit.toFloat() / n
+                  }
+
+                  // 1) bright gold buttons in the middle column: Daily Skip + Fight (anywhere vertically) or the reward OK
+                  val bx0 = (0.44f * W).toInt(); val bx1 = (0.565f * W).toInt(); val strip = bx1 - bx0
+                  val ya = (0.18f * H).toInt(); val yb = (0.98f * H).toInt()
+                  val cnt = IntArray(H)
+                  for (y in ya until yb) { var c = 0; for (x in bx0 until bx1) if (gold(x, y)) c++; cnt[y] = c }
+                  val blobs = mutableListOf<Blob>()
+                  var run0 = -1; var run1 = -1; var gapRows = 0
+                  fun closeRun() {
+                      if (run0 < 0) return
+                      val hh = (run1 - run0 + 1).toFloat() / H
+                      if (hh >= 0.045f && hh <= 0.08f) {
+                          var sx = 0L; var n = 0; var mnx = W; var mxx = 0
+                          for (y in run0..run1) for (x in bx0 until bx1) if (gold(x, y)) { sx += x; n++; mnx = min(mnx, x); mxx = max(mxx, x) }
+                          if (n > 0) {
+                              val w = (mxx - mnx + 1).toFloat() / W
+                              val fill = n.toFloat() / ((run1 - run0 + 1) * (mxx - mnx + 1))
+                              if (w in 0.075f..0.10f && fill >= 0.7f)
+                                  blobs.add(Blob(sx.toFloat() / n / W, (run0 + run1) / 2f / H, hh, w, fill))
+                          }
+                      }
+                      run0 = -1
+                  }
+                  for (y in ya until yb) {
+                      if (cnt[y] >= 0.22f * strip) { if (run0 < 0) run0 = y; run1 = y; gapRows = 0 }
+                      else if (run0 >= 0) { gapRows++; if (gapRows > 3) { closeRun(); gapRows = 0 } }
+                  }
+                  closeRun()
+
+                  var cls = 0
+                  val okB = blobs.firstOrNull { it.xc >= 0.505f }
+                  val fB = blobs.filter { it.xc < 0.505f }.sortedBy { it.yc }
+                  if (okB != null && fB.isEmpty()) {                       // reward box: only the OK button is bright
+                      cls = 3; tTx = okB.xc; tTy = okB.yc
+                  } else if (fB.size >= 2) {                               // Daily Skip above, Fight below
+                      val up = fB[fB.size - 2]; val low = fB[fB.size - 1]
+                      if (abs((low.yc - up.yc) - 0.107f) < 0.025f) { cls = 1; tTx = low.xc; tTy = low.yc }
+                  } else if (fB.size == 1 && (abs(fB[0].yc - 0.894f) < 0.02f || abs(fB[0].yc - 0.472f) < 0.02f)) {
+                      cls = 1; tTx = fB[0].xc; tTy = fB[0].yc              // only Fight left, at a known place
+                  }
+                  // 2) battle: Skip icon with Pause above it and the dark bar on top
+                  val skip = goldFrac(0.939f, 0.465f, 0.969f, 0.528f)
+                  val pause = goldFrac(0.939f, 0.300f, 0.969f, 0.363f)
+                  if (cls == 0 && skip >= 0.08f && pause >= 0.06f && darkFrac(0.438f, 0.010f, 0.610f, 0.087f) >= 0.6f) {
+                      cls = 2; tTx = 0.954f; tTy = 0.509f
+                  }
+                  val now = SystemClock.elapsedRealtime()
+                  if (cls != tClass) { tClass = cls; tSince = now }
+                  scheduleTower(320)
+                  publish(GuideState(false, debug = "tower %s fights=%d auto=%s blobs=%d skip %.2f pause %.2f".format(
+                      towerNames[cls], fights, if (autoEnabled) "on" else "off", blobs.size, skip, pause)))
+              }
+
+              private fun scheduleTower(ms: Long) {
+                  if (!towerPending) { towerPending = true; bg.postDelayed(towerCheck, max(20L, ms)) }
+              }
+
+              /** Runs on a timer, so it still works when the screen is static and no new frames arrive. */
+              private fun towerStep() {
+                  towerPending = false
+                  val cls = tClass
+                  if (cls == 0) return
+                  val now = SystemClock.elapsedRealtime()
+                  if (now - tSince < 300) { scheduleTower(320 - (now - tSince)); return }   // wait until the screen is steady
+                  if (now < pauseUntilMs) { scheduleTower(500); return }
+                  if (now < nextTapMs) { scheduleTower(nextTapMs - now + 20); return }
+                  if (!autoEnabled) { scheduleTower(1000); return }
+                  tapTower(cls, now)
+                  scheduleTower(1200)   // if the same screen is still there afterwards, the next check may tap again (limited)
+              }
+
+              private fun tapTower(cls: Int, now: Long) {
+                  val svc = TapService.instance
+                  if (svc == null) {
+                      status("auto: turn on the Bridge Helper accessibility service", true)
+                      pauseUntilMs = now + 3000; return
+                  }
+                  if (cls == lastTapClass) sameTap++ else { lastTapClass = cls; sameTap = 1 }
+                  if (sameTap > 3) {
+                      autoEnabled = false; sameTap = 0; lastTapClass = 0
+                      status("tower: stuck on ${towerNames[cls]}, auto turned off", true); return
+                  }
+                  val (sw, sh) = screenSize()
+                  val l = max(sw, sh).toFloat(); val sm = min(sw, sh).toFloat()
+                  if (svc.tap(tTx * l, tTy * sm) && cls == 1) fights++
+                  nextTapMs = now + (if (cls == 3) 1500L else 2500L)
+              }
+
+              // ---------- detection ----------
+              /** Mask of pole-coloured pixels in the thin strip beside the platform edge (slightly dilated). */
+              private class Ref(val x0: Int, val y0: Int, val cols: Int, val rows: Int, val bits: BooleanArray) {
+                  fun has(x: Int, y: Int): Boolean {
+                      val cx = x - x0; val cy = y - y0
+                      return cx in 0 until cols && cy in 0 until rows && bits[cy * cols + cx]
+                  }
+              }
+
+              private fun analyze(img: Image) {
+                  if (towerMode) { analyzeTower(img); return }
+                  val W = img.width; val H = img.height
+                  val pl = img.planes[0]; val buf = pl.buffer; val rs = pl.rowStride
+                  fun r(x: Int, y: Int) = buf.get(y * rs + x * 4 + (if (swap) 2 else 0)).toInt() and 255
+                  fun g(x: Int, y: Int) = buf.get(y * rs + x * 4 + 1).toInt() and 255
+                  fun b(x: Int, y: Int) = buf.get(y * rs + x * 4 + (if (swap) 0 else 2)).toInt() and 255
+                  fun teal(x: Int, y: Int): Boolean {
+                      val rr = r(x, y); val gg = g(x, y); val bb = b(x, y)
+                      return rr < 90 && gg in 95..190 && bb in 100..210 && gg > rr + 60 && abs(gg - bb) < 50
+                  }
+                  fun stone(x: Int, y: Int): Boolean {
+                      val rr = r(x, y); val gg = g(x, y); val bb = b(x, y)
+                      val mx = max(rr, max(gg, bb)); val mn = min(rr, min(gg, bb))
+                      return mx in 30..175 && mx - mn < 60 && !teal(x, y)
+                  }
+                  fun pole(x: Int, y: Int): Boolean {
+                      val rr = r(x, y); val gg = g(x, y); val bb = b(x, y)
+                      return rr <= 70 && gg in 80..150 && bb in 165..225 && bb - gg >= 55
+                  }
+                  fun stoneAny(x: Int, y1: Int, y2: Int) = x in 0 until W && (stone(x, y1) || stone(x, y2))
+
+                  // thin strip beside the pole's base: x0, x1, yTop, yEnd
+                  fun bounds(ytop: Int, base: Int) = intArrayOf(
+                      max(0, base - (W * 0.006f).toInt()), min(W - 1, base + (W * 0.016f).toInt()),
+                      max(0, ytop - (W * 0.38f).toInt()), ytop - max(3, (W * 0.006f).toInt()))
+                  fun buildRef(ytop: Int, base: Int): Ref {
+                      val bd = bounds(ytop, base); val cols = bd[1] - bd[0] + 1; val rows = max(1, bd[3] - bd[2])
+                      val bits = BooleanArray(cols * rows)
+                      for (y in bd[2] until bd[3]) for (x in bd[0]..bd[1]) if (pole(x, y)) {
+                          for (dy in -1..1) for (dx in -1..1) {
+                              val cx = x - bd[0] + dx; val cy = y - bd[2] + dy
+                              if (cx in 0 until cols && cy in 0 until rows) bits[cy * cols + cx] = true
+                          }
+                      }
+                      return Ref(bd[0], bd[2], cols, rows, bits)
+                  }
+                  // Pole length = height of the pole TIP (the hero hides the lower part). Only pixels that were NOT
+                  // already pole-coloured before the press count, so static clutter near the hero is ignored.
+                  fun tip(ytop: Int, base: Int, ref: Ref?): Float {
+                      val bd = bounds(ytop, base); val seg = max(3, (W * 0.006f).toInt())
+                      var run = 0
+                      for (y in bd[2] until bd[3]) {
+                          var hit = false; var x = bd[0]
+                          while (x <= bd[1]) { if (pole(x, y) && !(ref?.has(x, y) ?: false)) { hit = true; break }; x++ }
+                          if (hit) { run++; if (run >= seg) return (ytop - (y - seg + 1)).toFloat() } else run = 0
+                      }
+                      return 0f
+                  }
+                  val minLen = max(10f, W * 0.015f)
+                  val ts = img.timestamp
+
+                  // While a pole is growing, keep the geometry measured just before it started, but give up
+                  // as soon as the platform edge is no longer where we expect it (the scene scrolled).
+                  if (fValid) {
+                      val edgeOk = stoneAny(fBase - 2, fSy, fSy2) && !stoneAny(fBase + 3, fSy, fSy2)
+                      val len = if (edgeOk) tip(fTop, fBase, fRef) else 0f
+                      if (edgeOk && len >= minLen) { hold(ts, len); return }
+                      dropHold()
+                  }
+
+                  // 1) platform top = first row with some teal, for a few rows in a row
+                  val thr = max(4, (W * 0.015f).toInt()); val need = max(3, (W * 0.005f).toInt())
+                  var ytop = -1; var best = 0; var bestY = 0; var streak = 0
+                  for (y in (H * 0.30f).toInt() until (H * 0.98f).toInt()) {
+                      var c = 0; var x = 0
+                      while (x < W) { if (teal(x, y)) c++; x += 2 }
+                      if (c > best) { best = c; bestY = y }
+                      if (c >= thr) { streak++; if (streak >= need) { ytop = y - need + 1; break } } else streak = 0
+                  }
+                  if (ytop < 0) {
+                      resetGeom()
+                      // average colour of a sample grid (tells us if the capture is black)
+                      var sr = 0L; var sg = 0L; var sb = 0L; var n = 0
+                      for (yy in 0 until 8) for (xx in 0 until 16) {
+                          val px = (W * (xx + 0.5f) / 16).toInt(); val py = (H * (yy + 0.5f) / 8).toInt()
+                          sr += r(px, py); sg += g(px, py); sb += b(px, py); n++
+                      }
+                      val black = sr + sg + sb < n * 12L
+                      var altHit = false
+                      for (y in (H * 0.30f).toInt() until (H * 0.98f).toInt()) {
+                          var c = 0; var x = 0
+                          while (x < W) {
+                              val rr = b(x, y); val gg = g(x, y); val bb = r(x, y)
+                              if (rr < 90 && gg in 95..190 && bb in 100..210 && gg > rr + 60 && abs(gg - bb) < 50) c++
+                              x += 2
+                          }
+                          if (c >= thr) { altHit = true; break }
+                      }
+                      if (altHit) swap = !swap
+                      val note = when { black -> "BLACK capture"; altHit -> "swapped colours, retrying"; else -> "no platforms" }
+                      publish(GuideState(false, debug = "%s %dx%d best=%d avg=(%d,%d,%d)".format(
+                          note, W, H, best, sr / n, sg / n, sb / n)))
+                      return
+                  }
+
+                  // 2) stone runs just below the top edge -> platform extents
+                  val sy = min(H - 1, (ytop + W * 0.014f).toInt()); val sy2 = min(H - 1, (ytop + W * 0.017f).toInt())
+                  val tol = max(2, (W * 0.004f).toInt())
+                  val runs = mutableListOf<IntArray>()
+                  var s = -1; var last = -1
+                  for (x in 0 until W) {
+                      if (stone(x, sy) || stone(x, sy2)) { if (s < 0) s = x; last = x }
+                      else if (s >= 0 && x - last > tol) { runs.add(intArrayOf(s, last)); s = -1 }
+                  }
+                  if (s >= 0) runs.add(intArrayOf(s, last))
+                  val wide = runs.filter { it[1] - it[0] >= max(4f, W * 0.008f) }
+                  if (wide.size < 2) { resetGeom(); publish(GuideState(false, debug = "need 2 platforms: runs=%d %dx%d".format(wide.size, W, H))); return }
+                  val left = wide[0]; val right = wide[1]
+                  val gap = (right[0] - left[1]).toFloat(); val pw = (right[1] - right[0]).toFloat()
+                  if (gap < W * 0.02f) { resetGeom(); publish(GuideState(false, debug = "gap too small")); return }
+
+                  // 2b) the small blue "perfect landing" dot on top of the next platform
+                  var sx = 0L; var cnt = 0
+                  for (y in max(0, ytop - 1)..min(H - 1, ytop + max(4, (W * 0.012f).toInt())))
+                      for (x in right[0]..right[1])
+                          if (b(x, y) > g(x, y) + 35 && b(x, y) >= 140 && r(x, y) < 90) { sx += x; cnt++ }
+                  val dotRel = if (cnt in 2..40) sx.toFloat() / cnt - left[1] - W * 0.004f else -1f
+
+                  // 3) average the last few readings (reset if the scene jumped, e.g. scrolling)
+                  if (hist.isNotEmpty() && abs(gap - hist.last()[0]) > W * 0.03f) resetGeom()
+                  hist.add(floatArrayOf(gap, pw, left[1].toFloat(), ytop.toFloat(), dotRel))
+                  if (hist.size > 5) hist.removeAt(0)
+                  val m = FloatArray(5) { k ->
+                      val v = if (k == 4) hist.map { it[4] }.filter { it > 0f } else hist.map { it[k] }
+                      if (v.isEmpty()) -1f else v.average().toFloat()
+                  }
+                  val aimNow = chooseAim(m)
+                  val mTop = m[3].toInt(); val mBase = m[2].toInt()
+                  // a bridge lying across the gap means the last round is still playing out
+                  fun bridgePresent(): Boolean {
+                      val bx0 = mBase + 3; val bx1 = right[0] - 3
+                      if (bx1 - bx0 < 6) return false
+                      var cols = 0
+                      for (x in bx0..bx1) {
+                          var hit = false
+                          for (y in max(0, mTop - 4)..min(H - 1, mTop + 1)) if (pole(x, y)) { hit = true; break }
+                          if (hit) cols++
+                      }
+                      return cols > (bx1 - bx0) * 0.4f
+                  }
+                  fun idleState(len: Float) = GuideState(true, m[3], m[2], m[0] + 0.2f * m[1], m[0] + 0.8f * m[1], aimNow, 0f, 0, W,
+                      "bridge gap=%.0f w=%.0f dot=%s tip=%.0f auto=%s%s".format(m[0], m[1], if (m[4] > 0f) "yes" else "no", len,
+                          if (autoEnabled) "on" else "off", if (autoEnabled) " (" + autoWhy + " " + stable + ")" else ""))
+
+                  // 4) is a pole starting to grow? (needs the tip to rise over several frames in a row)
+                  val cur = ref
+                  if (cur == null) {
+                      ref = buildRef(mTop, mBase); arm = 0; armPrev = 0f; stable = 0
+                      publish(idleState(0f)); return
+                  }
+                  if (ts < cooldownUntil) {
+                      ref = buildRef(mTop, mBase); arm = 0; armPrev = 0f; stable = 0
+                      publish(idleState(0f)); return
+                  }
+                  val len = tip(mTop, mBase, cur)
+                  if (len >= minLen) {
+                      if (len > armPrev + 2f) arm++ else arm = 0
+                      armPrev = len
+                      if (arm >= 3) {
+                          fValid = true; fRef = cur
+                          fGap = m[0]; fPw = m[1]; fBase = mBase; fTop = mTop; fW = W; fAim = aimNow
+                          fSy = sy; fSy2 = sy2
+                          maxLen = len; lastGrowTs = ts; holdStartTs = ts
+                          hold(ts, len); return
+                      }
+                  } else { arm = 0; armPrev = 0f }
+                  if (arm == 0) ref = buildRef(mTop, mBase)   // absorb static clutter, but not a pole that is rising
+                  resetHold()
+                  // optional auto mode: press once calm, or force trigger if stuck waiting too long
+if (autoEnabled) {
+    if (autoActive) {
+        if (!fValid && ts - autoPressTs > 1_500_000_000L) { autoRelease(); autoBlockUntil = ts + 3_000_000_000L }
+    } else {
+        autoWhy = when {
+            arm != 0 || len >= minLen -> "pole?"
+            ts < autoBlockUntil -> "blocked"
+            bridgePresent() -> "bridge on screen"
+            else -> "ready"
+        }
+        
+        if (autoWhy == "ready") {
+            stable++
+        } else {
+            stable = 0
+            // Optional: track when we last saw a non-ready state
+        }
+
+        // Force trigger if stable hits 15 OR if we've been waiting for more than 1.5 seconds (1,500,000,000 nanoseconds)
+        // You can adjust the nanosecond threshold if you want it faster or slower
+        val forceTimeout = ts - (lastStableResetTime ?: ts) > 1_500_000_000L
+        
+        if (autoWhy != "ready") {
+            lastStableResetTime = ts
+        }
+
+        if (stable >= 15 || (stable > 5 && forceTimeout)) { 
+            stable = 0
+            lastStableResetTime = null
+            startAuto(ts, aimNow) 
+        }
+    }
+}
+                  publish(idleState(len))
+              }
+
+              /** Aim at the blue dot when it was seen and looks sane, else at aimFrac across the platform. */
+              private fun chooseAim(m: FloatArray): Float =
+                  if (m[4] > m[0] && m[4] < m[0] + m[1]) m[4] else m[0] + aimFrac * m[1]
+
+              private fun resetGeom() { hist.clear(); ref = null; arm = 0; armPrev = 0f }
+
+              private fun resetHold() { tsN.clear(); lsN.clear(); cued = false; played.fill(false) }
+
+              private fun dropHold() { autoRelease(); fValid = false; resetHold(); ref = null; arm = 0; armPrev = 0f }
+
+              /** Called for every frame while the pole is growing. */
+              private fun hold(ts: Long, len: Float) {
+                  val aim = fAim
+                  val lo = fGap + 0.2f * fPw; val hi = fGap + 0.8f * fPw
+                  fun idle(msg: String) = publish(GuideState(true, fTop.toFloat(), fBase.toFloat(), lo, hi, aim, 0f, 0, fW, msg))
+                  // the tip suddenly dropped: the pole was released and is falling
+                  if (lsN.isNotEmpty() && len < lsN.last() - 8f) { learnLead(lsN.last(), aim); dropHold(); cooldownUntil = ts + 800_000_000L; idle("released"); return }
+                  // no growth for a while, or held far too long: stop trusting this "pole"
+                  if (len > maxLen + 2f) { maxLen = len; lastGrowTs = ts }
+                  if (ts - lastGrowTs > 700_000_000L || ts - holdStartTs > 4_000_000_000L) { dropHold(); idle("lost pole"); return }
+                  if (tsN.isEmpty()) t0 = ts
+                  tsN.add((ts - t0) / 1e9f); lsN.add(len)
+                  if (tsN.size > 8) { tsN.removeAt(0); lsN.removeAt(0) }
+                  // growth rate = slope of a straight-line fit through the recent (time, length) samples
+                  var rate = 0f
+                  if (tsN.size >= 3) {
+                      val mt = tsN.average().toFloat(); val ml = lsN.average().toFloat()
+                      var num = 0f; var den = 0f
+                      for (k in tsN.indices) { num += (tsN[k] - mt) * (lsN[k] - ml); den += (tsN[k] - mt) * (tsN[k] - mt) }
+                      if (den > 1e-6f) rate = num / den
+                  }
+                  val remaining = aim - len
+                  val due = remaining <= 0f || (rate > 1f && remaining <= rate * leadMs / 1000f)
+                  lastRate = rate
+                  val phase = when { len > hi -> 3; due -> 2; else -> 1 }
+                  // countdown: 3 evenly spaced beats, then the release cue is the 4th beat
+                  if (beatMs > 0f && rate > 1f && !due && !autoActive) {
+                      val after = remaining / rate * 1000f - leadMs      // ms until the release cue
+                      for (k in 1..3) if (!played[k] && after > 0f && after <= k * beatMs) {
+                          for (j in k..3) played[j] = true
+                          vibrate(25, 120); beep(false)
+                          break
+                      }
+                  }
+                  if (phase == 2 && !cued) { cued = true; if (autoActive) autoRelease() else { vibrate(80, 255); beep(true) } }
+                  if (phase == 3 && autoActive) autoRelease()
+                  publish(GuideState(true, fTop.toFloat(), fBase.toFloat(), lo, hi, aim, len, phase, fW,
+                      "gap=%.0f w=%.0f len=%.0f rate=%.0f/s lead=%.0f%s".format(fGap, fPw, len, rate, leadMs, if (autoActive) " AUTO" else "")))
+              }
+
+              /** After a release: how late (+) or early (-) was it compared to the aim point? Nudge the lead to cancel it. */
+              private fun learnLead(finalLen: Float, aim: Float) {
+                  if (lastRate < 50f) return
+                  val timeErrMs = (finalLen - aim) / lastRate * 1000f
+                  if (abs(timeErrMs) > 500f) return                  // ignore wild outliers (e.g. you let go on purpose)
+                  if (lastRate in 100f..1000f) rateEst = rateEst * 0.7f + lastRate * 0.3f
+                  leadMs = (leadMs + 0.4f * timeErrMs).coerceIn(30f, 400f)
+                  getSharedPreferences("p", MODE_PRIVATE).edit().putFloat("lead", leadMs).apply()
+              }
+
+              private fun autoRelease() { if (autoActive) { autoActive = false; TapService.instance?.release() } }
+
+              private fun startAuto(ts: Long, aim: Float) {
+                  val svc = TapService.instance
+                  if (svc == null) {
+                      status("auto: turn on the Bridge Helper accessibility service", true)
+                      autoBlockUntil = ts + 3_000_000_000L; return
+                  }
+                  val (sw, sh) = screenSize()
+                  // press in empty sky on the right: "press anywhere" works in the game and misses the result-screen buttons
+                  if (svc.press(max(sw, sh) * 0.92f, min(sw, sh) * 0.55f)) {
+                      autoActive = true; autoPressTs = ts
+                      // the hero hides the first ~50px of pole, so for short aims release by time; otherwise only a safety net
+                      val ms = aim / rateEst * 1000f
+                      val delay = if (aim < 100f) ms - 50f else ms + 400f
+                      bg.postDelayed({ if (autoActive && ts == autoPressTs) autoRelease() }, max(30f, delay).toLong())
+                  }
+              }
+
+              private fun beep(release: Boolean) {
+                  try { tone?.startTone(if (release) ToneGenerator.TONE_DTMF_9 else ToneGenerator.TONE_DTMF_1, if (release) 150 else 45) }
+                  catch (_: Exception) { }
+              }
+
+              @Suppress("DEPRECATION")
+              private fun vibrate(ms: Long = 60, amp: Int = 255) {
+                  val v = getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
+                  if (Build.VERSION.SDK_INT >= 26) v.vibrate(VibrationEffect.createOneShot(ms, amp)) else v.vibrate(ms)
+              }
+
+              private fun publish(s: GuideState) { val f = frames; status("f=$f ${s.debug}"); ui.post { guide?.let { it.state = s; it.frames = f; it.invalidate() } } }
+
+              override fun onDestroy() {
+                  autoRelease()
+                  tone?.release()
+                  vd?.release(); reader?.close(); projection?.stop()
+                  guide?.let { runCatching { wm.removeView(it) } }
+                  if (::ht.isInitialized) ht.quitSafely()
+                  super.onDestroy()
+              }
+          }
+
+          class GuideView(c: Context) : View(c) {
+              @Volatile var state = GuideState(false, debug = "starting")
+              @Volatile var frames = 0
+              private val d = resources.displayMetrics.density
+              private val paint = Paint().apply { isAntiAlias = true }
+              private val dbg = Paint().apply { color = Color.WHITE; textSize = 11 * d; setShadowLayer(4f, 0f, 0f, Color.BLACK) }
+              private val loc = IntArray(2)
+
+              @Suppress("DEPRECATION")
+              private fun displayWidth(): Int {
+                  val dm = context.getSystemService(Context.DISPLAY_SERVICE) as DisplayManager
+                  val m = DisplayMetrics()
+                  dm.getDisplay(Display.DEFAULT_DISPLAY).getRealMetrics(m)
+                  return max(m.widthPixels, m.heightPixels)
+              }
+
+              override fun onDraw(cv: Canvas) {
+                  val s = state; val w = width.toFloat(); val h = height.toFloat()
+                  cv.drawText("f=$frames ${s.debug}", 8 * d, h - 8 * d, dbg)
+                  if (!s.ok) return
+
+                  // capture pixel -> pixel inside this window (the window may not start at the screen's corner)
+                  getLocationOnScreen(loc)
+                  val sx = displayWidth().toFloat() / s.capW
+                  fun X(v: Float) = v * sx - loc[0]
+                  fun Y(v: Float) = v * sx - loc[1]
+
+                  // One colour tells the whole story: white = idle, amber = growing, green = release now, red = too long
+                  val c = when (s.phase) {
+                      1 -> Color.rgb(255, 179, 0)
+                      2 -> Color.rgb(0, 230, 0)
+                      3 -> Color.rgb(255, 60, 60)
+                      else -> Color.argb(220, 255, 255, 255)
+                  }
+                  fun stroke(width: Float, color: Int) { paint.style = Paint.Style.STROKE; paint.strokeWidth = width; paint.color = color }
+                  fun fill(color: Int) { paint.style = Paint.Style.FILL; paint.color = color }
+
+                  val ax = X(s.baseX + s.aim)    // anchor x
+                  val bx = X(s.baseX)            // pole base x
+
+                  // Platform overlay right under the anchor point (kept below the rows the detector measures)
+                  val half = (s.winHi - s.winLo) / 2f
+                  fill(c)
+                  cv.drawRoundRect(X(s.baseX + s.aim - half), Y(s.ytop + s.capW * 0.021f),
+                      X(s.baseX + s.aim + half), Y(s.ytop + s.capW * 0.031f), 6 * d, 6 * d, paint)
+
+                  // Reach line: the pole must be as long as base -> anchor. Thin so the pole stays visible to the detector.
+                  val ly = Y(s.ytop - 12)
+                  stroke(2 * d, Color.argb(200, 255, 255, 255))
+                  cv.drawLine(bx, ly, ax, ly, paint)
+                  if (s.len > 0f) {
+                      stroke(2 * d, c)
+                      cv.drawLine(bx, ly, X(s.baseX + min(s.len, s.aim)), ly, paint)
+                  }
+                  fill(c); cv.drawCircle(ax, ly, 7 * d, paint)
+
+                  // Length ruler beside the pole's spawn point
+                  val rx = X(s.baseX + s.capW * 0.03f)
+                  fun yAt(v: Float) = max(0f, Y(s.ytop - v))
+                  stroke(2 * d, Color.argb(140, 255, 255, 255))
+                  cv.drawLine(rx, Y(s.ytop - 2), rx, yAt(s.winHi), paint)
+                  stroke(4 * d, c)
+                  cv.drawLine(rx, yAt(s.winLo), rx, yAt(s.winHi), paint)
+                  cv.drawLine(rx - 14 * d, yAt(s.aim), rx + 14 * d, yAt(s.aim), paint)
+                  if (s.len > 0f) { fill(if (s.phase == 3) Color.RED else Color.WHITE); cv.drawCircle(rx, yAt(s.len), 6 * d, paint) }
+
+                  // Screen border flashes when it is time to release (green) or you overshot (red)
+                  if (s.phase == 2 || s.phase == 3) {
+                      stroke(12 * d, c)
+                      cv.drawRect(0f, 0f, w, h, paint)
+                  }
+              }
+          }
+          BH_EOF
+          mkdir -p "$(dirname app/src/main/java/com/example/bridgehelper/TapService.kt)"
+          cat > app/src/main/java/com/example/bridgehelper/TapService.kt <<'BH_EOF'
+                    package com.example.bridgehelper
+
+          import android.accessibilityservice.AccessibilityService
+          import android.accessibilityservice.GestureDescription
+          import android.content.Intent
+          import android.graphics.Path
+          import android.view.accessibility.AccessibilityEvent
+
+          /** Does nothing by itself: OverlayService asks it to press and release the screen when Auto is on. */
+          class TapService : AccessibilityService() {
+              companion object { @Volatile var instance: TapService? = null }
+
+              private var px = 0f; private var py = 0f
+              @Volatile private var isPressed = false
+
+              override fun onServiceConnected() { instance = this }
+              override fun onUnbind(intent: Intent?): Boolean { instance = null; return super.onUnbind(intent) }
+              override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
+              override fun onInterrupt() { isPressed = false }
+
+              /** A quick single tap at (x, y). */
+              fun tap(x: Float, y: Float): Boolean {
+                  val path = Path().apply { moveTo(x, y); lineTo(x, y + 1f) }
+                  val s = GestureDescription.StrokeDescription(path, 0, 60)
+                  return dispatchGesture(GestureDescription.Builder().addStroke(s).build(), null, null)
+              }
+
+              /** Presses at (x, y) and keeps holding. */
+              fun press(x: Float, y: Float): Boolean {
+                  px = x; py = y
+                  val path = Path().apply { moveTo(x, y) }
+                  val s = GestureDescription.StrokeDescription(path, 0, 200, true)
+                  isPressed = true
+                  val ok = dispatchGesture(GestureDescription.Builder().addStroke(s).build(),
+                      object : AccessibilityService.GestureResultCallback() {
+                          override fun onCancelled(gestureDescription: GestureDescription?) { isPressed = false }
+                      }, null)
+                  if (!ok) isPressed = false
+                  return ok
+              }
+
+              /** Lifts the finger that press() put down. */
+              fun release() {
+                  if (!isPressed) return
+                  isPressed = false
+                  val path = Path().apply { moveTo(px, py); lineTo(px, py + 1f) }
+                  val s = GestureDescription.StrokeDescription(path, 0, 20, false)
+                  dispatchGesture(GestureDescription.Builder().addStroke(s).build(), null, null)
+              }
+          }
+
+          BH_EOF
+      - name: Accept SDK licenses
+        run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+      - name: Build debug APK
+        run: gradle assembleDebug --no-daemon
+      - name: Publish APK to Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Bridge Helper build ${{ github.run_number }}
+          files: app/build/outputs/apk/debug/app-debug.apk
