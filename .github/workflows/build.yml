@@ -884,7 +884,7 @@ jobs:
           BH_EOF
           mkdir -p "$(dirname app/src/main/java/com/example/bridgehelper/TapService.kt)"
           cat > app/src/main/java/com/example/bridgehelper/TapService.kt <<'BH_EOF'
-          package com.example.bridgehelper
+                    package com.example.bridgehelper
 
           import android.accessibilityservice.AccessibilityService
           import android.accessibilityservice.GestureDescription
@@ -896,41 +896,45 @@ jobs:
           class TapService : AccessibilityService() {
               companion object { @Volatile var instance: TapService? = null }
 
-              private var stroke: GestureDescription.StrokeDescription? = null
               private var px = 0f; private var py = 0f
+              @Volatile private var isPressed = false
 
               override fun onServiceConnected() { instance = this }
               override fun onUnbind(intent: Intent?): Boolean { instance = null; return super.onUnbind(intent) }
               override fun onAccessibilityEvent(event: AccessibilityEvent?) {}
-              override fun onInterrupt() { stroke = null }
+              override fun onInterrupt() { isPressed = false }
 
               /** A quick single tap at (x, y). */
               fun tap(x: Float, y: Float): Boolean {
-                  val s = GestureDescription.StrokeDescription(Path().apply { moveTo(x, y) }, 0, 60)
+                  val path = Path().apply { moveTo(x, y); lineTo(x, y + 1f) }
+                  val s = GestureDescription.StrokeDescription(path, 0, 60)
                   return dispatchGesture(GestureDescription.Builder().addStroke(s).build(), null, null)
               }
 
-              /** Presses at (x, y) and keeps holding until release() is called. */
+              /** Presses at (x, y) and keeps holding. */
               fun press(x: Float, y: Float): Boolean {
                   px = x; py = y
-                  val s = GestureDescription.StrokeDescription(Path().apply { moveTo(x, y) }, 0, 80, true)
-                  stroke = s
+                  val path = Path().apply { moveTo(x, y) }
+                  val s = GestureDescription.StrokeDescription(path, 0, 200, true)
+                  isPressed = true
                   val ok = dispatchGesture(GestureDescription.Builder().addStroke(s).build(),
                       object : AccessibilityService.GestureResultCallback() {
-                          override fun onCancelled(gestureDescription: GestureDescription?) { if (stroke === s) stroke = null }
+                          override fun onCancelled(gestureDescription: GestureDescription?) { isPressed = false }
                       }, null)
-                  if (!ok) stroke = null
+                  if (!ok) isPressed = false
                   return ok
               }
 
               /** Lifts the finger that press() put down. */
               fun release() {
-                  val s = stroke ?: return
-                  stroke = null
-                  val c = s.continueStroke(Path().apply { moveTo(px, py) }, 0, 20, false)
-                  dispatchGesture(GestureDescription.Builder().addStroke(c).build(), null, null)
+                  if (!isPressed) return
+                  isPressed = false
+                  val path = Path().apply { moveTo(px, py); lineTo(px, py + 1f) }
+                  val s = GestureDescription.StrokeDescription(path, 0, 20, false)
+                  dispatchGesture(GestureDescription.Builder().addStroke(s).build(), null, null)
               }
           }
+
           BH_EOF
       - name: Accept SDK licenses
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
