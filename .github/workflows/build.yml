@@ -337,173 +337,6 @@ jobs:
                   }, bg)
 
                   guide = GuideView(this).also {
-                      val lp = WindowManager.LayoutParams(      startActivityForResult(mpm.createScreenCaptureIntent(), 100)
-                  })
-                  root.addView(btn("Stop") { stopService(Intent(this, OverlayService::class.java)) })
-                  root.addView(tv("Status (also shown in the notification while it runs):"))
-                  statusView = TextView(this).apply { text = prefs.getString("status", "not started") }
-                  root.addView(statusView)
-                  root.addView(btn("Refresh status") { showStatus() })
-                  root.addView(tv("Choose \"Entire screen\" if asked what to share. Then open the game. The app finds the platforms, " +
-                      "marks the landing zone, vibrates when to let go, and shows RELEASE / TOO LONG on screen."))
-                  setContentView(ScrollView(this).apply { addView(root) })
-              }
-
-              override fun onResume() {
-                  super.onResume(); showStatus()
-                  // the service may have learned a better lead while this screen was in the background
-                  lead.setText(getSharedPreferences("p", MODE_PRIVATE).getFloat("lead", 100f).toInt().toString())
-              }
-
-              private fun showStatus() {
-                  statusView.text = getSharedPreferences("p", MODE_PRIVATE).getString("status", "not started")
-              }
-
-              @Deprecated("Deprecated in Java")
-              override fun onActivityResult(req: Int, res: Int, data: Intent?) {
-                  super.onActivityResult(req, res, data)
-                  if (req == 100 && res == RESULT_OK && data != null) {
-                      startForegroundService(Intent(this, OverlayService::class.java)
-                          .putExtra("code", res).putExtra("data", data))
-                  }
-              }
-          }
-          BH_EOF
-          mkdir -p "$(dirname app/src/main/java/com/example/bridgehelper/OverlayService.kt)"
-          cat > app/src/main/java/com/example/bridgehelper/OverlayService.kt <<'BH_EOF'
-          package com.example.bridgehelper
-
-          import android.app.*
-          import android.content.Context
-          import android.content.Intent
-          import android.content.pm.ServiceInfo
-          import android.content.res.Configuration
-          import android.graphics.*
-          import android.graphics.drawable.Icon
-          import android.hardware.display.DisplayManager
-          import android.hardware.display.VirtualDisplay
-          import android.media.Image
-          import android.media.AudioManager
-          import android.media.ImageReader
-          import android.media.ToneGenerator
-          import android.media.projection.MediaProjection
-          import android.media.projection.MediaProjectionManager
-          import android.os.*
-          import android.util.DisplayMetrics
-          import android.view.*
-          import kotlin.math.abs
-          import kotlin.math.max
-          import kotlin.math.min
-
-          /** phase: 0 idle, 1 holding, 2 release now, 3 too long */
-          class GuideState(
-              val ok: Boolean, val ytop: Float = 0f, val baseX: Float = 0f, val winLo: Float = 0f,
-              val winHi: Float = 0f, val aim: Float = 0f, val len: Float = 0f, val phase: Int = 0,
-              val capW: Int = 1, val debug: String = ""
-          )
-
-          class OverlayService : Service() {
-              private lateinit var wm: WindowManager
-              private var projection: MediaProjection? = null
-              private var vd: VirtualDisplay? = null
-              private var reader: ImageReader? = null
-              private lateinit var ht: HandlerThread
-              private lateinit var bg: Handler
-              private val ui = Handler(Looper.getMainLooper())
-              private var guide: GuideView? = null
-              @Volatile private var frames = 0
-              private lateinit var nb: Notification.Builder
-              private var lastStatusT = 0L
-              @Volatile private var swap = false   // some devices deliver red/blue swapped
-              private var capW = 1; private var capH = 1
-              private var leadMs = 100f; private var aimFrac = 0.5f
-              private var beatMs = 150f                 // spacing of the countdown beats, 0 = off
-              private val played = BooleanArray(4)      // which countdown beats were already given this hold
-              private var lastRate = 0f
-              private var tone: ToneGenerator? = null
-              // optional auto mode (presses/releases through TapService)
-              private var autoEnabled = false
-              @Volatile private var autoActive = false
-              private var autoPressTs = 0L; private var autoBlockUntil = 0L; private var stable = 0
-              // "Tower" mode: Fight > Skip > OK
-              private var towerMode = false
-              @Volatile private var tClass = 0           // 0 waiting, 1 FIGHT, 2 SKIP, 3 OK
-              @Volatile private var tSince = 0L
-              private var towerPending = false
-              private var nextTapMs = 0L; private var pauseUntilMs = 0L
-              private var lastTapClass = 0; private var sameTap = 0; private var fights = 0
-              @Volatile private var tTx = 0f; @Volatile private var tTy = 0f   // where to tap, as fractions of the screen
-              private val towerNames = arrayOf("waiting", "FIGHT", "SKIP", "OK")
-              private val towerCheck = Runnable { towerStep() }
-              private var autoWhy = ""
-              private var rateEst = 295f                // pole growth in capture px/s, learned from your holds
-              private var lastStableResetTime: Long? = null
-
-              // geometry smoothing / freezing while the pole grows
-              private val hist = ArrayList<FloatArray>()
-              private var fValid = false; private var fTop = 0; private var fBase = 0
-              private var fGap = 0f; private var fPw = 0f; private var fW = 1; private var fAim = 0f
-              // pole growth samples
-              private val tsN = ArrayList<Float>(); private val lsN = ArrayList<Float>()
-              private var t0 = 0L; private var cued = false
-              // pole tracking: reference of "pole-blue" clutter seen before the press, and arming logic
-              private var ref: Ref? = null; private var fRef: Ref? = null
-              private var arm = 0; private var armPrev = 0f
-              private var fSy = 0; private var fSy2 = 0
-              private var maxLen = 0f; private var lastGrowTs = 0L; private var holdStartTs = 0L
-              private var cooldownUntil = 0L   // ignore "new poles" briefly after a release (the falling pole looks like one)
-
-              override fun onBind(i: Intent?): IBinder? = null
-
-              override fun onCreate() {
-                  super.onCreate()
-                  wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
-              }
-
-              @Suppress("DEPRECATION")
-              private fun dataExtra(i: Intent): Intent? =
-                  if (Build.VERSION.SDK_INT >= 33) i.getParcelableExtra("data", Intent::class.java)
-                  else i.getParcelableExtra("data")
-
-              override fun onStartCommand(i: Intent?, f: Int, id: Int): Int {
-                  if (i?.action == "TOGGLE_AUTO") {
-                      if (!::nb.isInitialized) { stopSelf(); return START_NOT_STICKY }
-                      autoEnabled = !autoEnabled
-                      if (!autoEnabled) autoRelease()
-                      status("auto " + (if (autoEnabled) "ON" else "OFF"), true)
-                      return START_NOT_STICKY
-                  }
-                  if (i == null || projection != null) return START_NOT_STICKY
-                  val ch = "ov"
-                  (getSystemService(NOTIFICATION_SERVICE) as NotificationManager)
-                      .createNotificationChannel(NotificationChannel(ch, "Overlay", NotificationManager.IMPORTANCE_LOW))
-                  nb = Notification.Builder(this, ch).setContentTitle("Bridge Helper running")
-                      .setContentText("starting…").setSmallIcon(android.R.drawable.ic_menu_compass)
-                      .addAction(Notification.Action.Builder(
-                          Icon.createWithResource(this, android.R.drawable.ic_media_pause), "Auto on/off",
-                          PendingIntent.getService(this, 1, Intent(this, OverlayService::class.java).setAction("TOGGLE_AUTO"),
-                              PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)).build())
-                  if (Build.VERSION.SDK_INT >= 29)
-                      startForeground(1, nb.build(), ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
-                  else startForeground(1, nb.build())
-                  try {
-
-                  val prefs = getSharedPreferences("p", MODE_PRIVATE)
-                  leadMs = prefs.getFloat("lead", 100f); aimFrac = prefs.getFloat("aim", 0.5f).coerceIn(0f, 1f)
-                  beatMs = prefs.getFloat("beat", 150f).coerceIn(0f, 400f)
-                  autoEnabled = prefs.getBoolean("auto", false)
-                  towerMode = prefs.getString("mode", "bridge") == "tower"
-                  tone = try { ToneGenerator(AudioManager.STREAM_MUSIC, 100) } catch (_: Exception) { null }
-
-                  ht = HandlerThread("cap").also { it.start() }; bg = Handler(ht.looper)
-                  val mpm = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-                  val data = dataExtra(i) ?: run { stopSelf(); return START_NOT_STICKY }
-                  projection = mpm.getMediaProjection(i.getIntExtra("code", 0), data)
-                  projection!!.registerCallback(object : MediaProjection.Callback() {
-                      override fun onStop() { status("capture was stopped by the system or another app", true); stopSelf() }
-                  }, bg)
-
-                  guide = GuideView(this).also {
                       val lp = WindowManager.LayoutParams(
                           WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT,
                           WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
@@ -857,39 +690,36 @@ jobs:
                   if (arm == 0) ref = buildRef(mTop, mBase)   // absorb static clutter, but not a pole that is rising
                   resetHold()
                   // optional auto mode: press once calm, or force trigger if stuck waiting too long
-if (autoEnabled) {
-    if (autoActive) {
-        if (!fValid && ts - autoPressTs > 1_500_000_000L) { autoRelease(); autoBlockUntil = ts + 3_000_000_000L }
-    } else {
-        autoWhy = when {
-            arm != 0 || len >= minLen -> "pole?"
-            ts < autoBlockUntil -> "blocked"
-            bridgePresent() -> "bridge on screen"
-            else -> "ready"
-        }
-        
-        if (autoWhy == "ready") {
-            stable++
-        } else {
-            stable = 0
-            // Optional: track when we last saw a non-ready state
-        }
+                  if (autoEnabled) {
+                      if (autoActive) {
+                          if (!fValid && ts - autoPressTs > 1_500_000_000L) { autoRelease(); autoBlockUntil = ts + 3_000_000_000L }
+                      } else {
+                          autoWhy = when {
+                              arm != 0 || len >= minLen -> "pole?"
+                              ts < autoBlockUntil -> "blocked"
+                              bridgePresent() -> "bridge on screen"
+                              else -> "ready"
+                          }
+                          
+                          if (autoWhy == "ready") {
+                              stable++
+                          } else {
+                              stable = 0
+                          }
 
-        // Force trigger if stable hits 15 OR if we've been waiting for more than 1.5 seconds (1,500,000,000 nanoseconds)
-        // You can adjust the nanosecond threshold if you want it faster or slower
-        val forceTimeout = ts - (lastStableResetTime ?: ts) > 1_500_000_000L
-        
-        if (autoWhy != "ready") {
-            lastStableResetTime = ts
-        }
+                          val forceTimeout = ts - (lastStableResetTime ?: ts) > 1_500_000_000L
+                          
+                          if (autoWhy != "ready") {
+                              lastStableResetTime = ts
+                          }
 
-        if (stable >= 15 || (stable > 5 && forceTimeout)) { 
-            stable = 0
-            lastStableResetTime = null
-            startAuto(ts, aimNow) 
-        }
-    }
-}
+                          if (stable >= 15 || (stable > 5 && forceTimeout)) { 
+                              stable = 0
+                              lastStableResetTime = null
+                              startAuto(ts, aimNow) 
+                          }
+                      }
+                  }
                   publish(idleState(len))
               }
 
@@ -1071,7 +901,7 @@ if (autoEnabled) {
           BH_EOF
           mkdir -p "$(dirname app/src/main/java/com/example/bridgehelper/TapService.kt)"
           cat > app/src/main/java/com/example/bridgehelper/TapService.kt <<'BH_EOF'
-                    package com.example.bridgehelper
+          package com.example.bridgehelper
 
           import android.accessibilityservice.AccessibilityService
           import android.accessibilityservice.GestureDescription
@@ -1121,7 +951,6 @@ if (autoEnabled) {
                   dispatchGesture(GestureDescription.Builder().addStroke(s).build(), null, null)
               }
           }
-
           BH_EOF
       - name: Accept SDK licenses
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
