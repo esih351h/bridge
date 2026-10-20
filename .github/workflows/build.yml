@@ -270,6 +270,7 @@ jobs:
               private val towerCheck = Runnable { towerStep() }
               private var autoWhy = ""
               private var rateEst = 295f                // pole growth in capture px/s, learned from your holds
+              private var lastStableResetTime: Long? = null
 
               // geometry smoothing / freezing while the pole grows
               private val hist = ArrayList<FloatArray>()
@@ -688,21 +689,40 @@ jobs:
                   } else { arm = 0; armPrev = 0f }
                   if (arm == 0) ref = buildRef(mTop, mBase)   // absorb static clutter, but not a pole that is rising
                   resetHold()
-                  // optional auto mode: press once the scene has been calm for a moment; the release happens in hold()
-                  if (autoEnabled) {
-                      if (autoActive) {
-                          if (!fValid && ts - autoPressTs > 1_500_000_000L) { autoRelease(); autoBlockUntil = ts + 3_000_000_000L }
-                      } else {
-                          autoWhy = when {
-                              arm != 0 || len >= minLen -> "pole?"
-                              ts < autoBlockUntil -> "blocked"
-                              bridgePresent() -> "bridge on screen"
-                              else -> "ready"
-                          }
-                          stable = if (autoWhy == "ready") stable + 1 else 0
-                          if (stable >= 15) { stable = 0; startAuto(ts, aimNow) }
-                      }
-                  }
+                  // optional auto mode: press once calm, or force trigger if stuck waiting too long
+if (autoEnabled) {
+    if (autoActive) {
+        if (!fValid && ts - autoPressTs > 1_500_000_000L) { autoRelease(); autoBlockUntil = ts + 3_000_000_000L }
+    } else {
+        autoWhy = when {
+            arm != 0 || len >= minLen -> "pole?"
+            ts < autoBlockUntil -> "blocked"
+            bridgePresent() -> "bridge on screen"
+            else -> "ready"
+        }
+        
+        if (autoWhy == "ready") {
+            stable++
+        } else {
+            stable = 0
+            // Optional: track when we last saw a non-ready state
+        }
+
+        // Force trigger if stable hits 15 OR if we've been waiting for more than 1.5 seconds (1,500,000,000 nanoseconds)
+        // You can adjust the nanosecond threshold if you want it faster or slower
+        val forceTimeout = ts - (lastStableResetTime ?: ts) > 1_500_000_000L
+        
+        if (autoWhy != "ready") {
+            lastStableResetTime = ts
+        }
+
+        if (stable >= 15 || (stable > 5 && forceTimeout)) { 
+            stable = 0
+            lastStableResetTime = null
+            startAuto(ts, aimNow) 
+        }
+    }
+}
                   publish(idleState(len))
               }
 
