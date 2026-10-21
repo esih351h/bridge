@@ -119,6 +119,8 @@ jobs:
               private lateinit var aim: EditText
               private lateinit var beat: EditText
               private lateinit var timedAdj: EditText
+              private lateinit var pressX: EditText
+              private lateinit var pressY: EditText
               private lateinit var autoBox: CheckBox
               private lateinit var modeGroup: RadioGroup
               private lateinit var statusView: TextView
@@ -147,6 +149,9 @@ jobs:
                   lead = num(prefs.getFloat("lead", 100f)); root.addView(lead, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
                   root.addView(tv("Countdown beats: 3 evenly spaced beeps/buzzes, then release on the 4th beat. Spacing in ms (0 = off)."))
                   beat = num(prefs.getFloat("beat", 150f)); root.addView(beat, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+                  root.addView(tv("Where auto presses, as % of the screen (X from the left, Y from the top). Default 52 / 45 is the middle of the sky, below the reward bar. If the pole does not rise, try another empty spot."))
+                  pressX = num(prefs.getFloat("pressX", 52f)); root.addView(pressX, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+                  pressY = num(prefs.getFloat("pressY", 45f)); root.addView(pressY, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
                   root.addView(tv("Fixed-length hold (used for short bridges, or if a normal hold does not work). Adjust in ms: + if the bridge comes out short, - if too long. It also learns after each round."))
                   timedAdj = num(prefs.getFloat("timedAdj", 0f)); root.addView(timedAdj, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
                   root.addView(tv("Aim point on the next platform, 0.0 = near edge, 0.5 = middle, 1.0 = far edge."))
@@ -171,6 +176,8 @@ jobs:
                           .putFloat("aim", aim.text.toString().toFloatOrNull() ?: 0.5f)
                           .putFloat("beat", beat.text.toString().toFloatOrNull() ?: 150f)
                           .putFloat("timedAdj", timedAdj.text.toString().toFloatOrNull() ?: 0f)
+                          .putFloat("pressX", pressX.text.toString().toFloatOrNull() ?: 52f)
+                          .putFloat("pressY", pressY.text.toString().toFloatOrNull() ?: 45f)
                           .putBoolean("auto", autoBox.isChecked)
                           .putString("mode", if (modeGroup.checkedRadioButtonId == 102) "tower" else "bridge").apply()
                       val mpm = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
@@ -278,6 +285,7 @@ jobs:
               @Volatile private var tTx = 0f; @Volatile private var tTy = 0f   // where to tap, as fractions of the screen
               private val towerNames = arrayOf("waiting", "FIGHT", "SKIP", "OK")
               private val towerCheck = Runnable { towerStep() }
+              private var pressFx = 0.52f; private var pressFy = 0.45f   // where the hold is pressed, as fractions of the screen
               private var timedAdjMs = 0f                // fine-tune for the fixed-length press on short bridges
               private var lastIdle: GuideState? = null; private var lastGoodTs = 0L; private var jump = 0   // flicker tolerance
               private var rateEst = 295f                // pole growth in capture px/s, learned from your holds
@@ -336,6 +344,8 @@ jobs:
                   beatMs = prefs.getFloat("beat", 150f).coerceIn(0f, 400f)
                   autoEnabled = prefs.getBoolean("auto", false)
                   timedAdjMs = prefs.getFloat("timedAdj", 0f)
+                  pressFx = (prefs.getFloat("pressX", 52f) / 100f).coerceIn(0.05f, 0.95f)
+                  pressFy = (prefs.getFloat("pressY", 45f) / 100f).coerceIn(0.05f, 0.95f)
                   towerMode = prefs.getString("mode", "bridge") == "tower"
                   tone = try { ToneGenerator(AudioManager.STREAM_MUSIC, 100) } catch (_: Exception) { null }
 
@@ -843,7 +853,7 @@ jobs:
                       readyAtMs = now + 3000L; return false
                   }
                   val (sw, sh) = screenSize()
-                  val x = max(sw, sh) * 0.92f; val y = min(sw, sh) * 0.55f   // empty sky: "press anywhere" works in the game
+                  val x = max(sw, sh) * pressFx; val y = min(sw, sh) * pressFy   // default: middle of the sky, below the reward bar
                   val ms = aim / rateEst * 1000f
                   pressTimed = useTimed || aim < 100f
                   pressedAtMs = now; autoToken = now
@@ -853,12 +863,12 @@ jobs:
                       if (!svc.holdFor(x, y, dur)) { status("press was refused by Android", true); readyAtMs = now + 3000L; return false }
                       autoActive = true
                       bg.postDelayed({ if (autoActive && autoToken == token) autoRelease() }, dur + 150)   // the stroke ends by itself
-                      status("holding for $dur ms (aim ${aim.toInt()})", true)
+                      status("holding at ${x.toInt()},${y.toInt()} for $dur ms (aim ${aim.toInt()})", true)
                   } else {
                       if (!svc.press(x, y)) { status("press was refused by Android", true); readyAtMs = now + 3000L; return false }
                       autoActive = true
                       bg.postDelayed({ if (autoActive && autoToken == token) autoRelease() }, max(400f, ms + 600f).toLong())  // safety net
-                      status("holding, will release at aim ${aim.toInt()}", true)
+                      status("holding at ${x.toInt()},${y.toInt()}, release at aim ${aim.toInt()}", true)
                   }
                   return true
               }
