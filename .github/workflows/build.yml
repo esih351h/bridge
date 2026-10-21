@@ -120,7 +120,7 @@ jobs:
           BH_EOF
           mkdir -p "$(dirname app/src/main/java/com/ahelper/MainActivity.kt)"
           cat > app/src/main/java/com/ahelper/MainActivity.kt <<'BH_EOF'
-          package com.olhelper
+          package com.ahelper
 
           import android.Manifest
           import android.app.Activity
@@ -321,7 +321,7 @@ jobs:
           BH_EOF
           mkdir -p "$(dirname app/src/main/java/com/ahelper/OverlayService.kt)"
           cat > app/src/main/java/com/ahelper/OverlayService.kt <<'BH_EOF'
-          package com.olhelper
+          package com.ahelper
 
           import android.app.*
           import android.content.Context
@@ -1082,9 +1082,9 @@ jobs:
               }
           }
           BH_EOF
-          mkdir -p "$(dirname app/src/main/java/com/example/bridgehelper/TapService.kt)"
-          cat > app/src/main/java/com/example/bridgehelper/TapService.kt <<'BH_EOF'
-          package com.olhelper
+          mkdir -p "$(dirname app/src/main/java/com/ahelper/TapService.kt)"
+          cat > app/src/main/java/com/ahelper/TapService.kt <<'BH_EOF'
+          package com.ahelper
 
           import android.accessibilityservice.AccessibilityService
           import android.accessibilityservice.GestureDescription
