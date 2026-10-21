@@ -224,7 +224,6 @@ jobs:
           import android.os.*
           import android.util.DisplayMetrics
           import android.view.*
-          import android.widget.*
           import kotlin.math.abs
           import kotlin.math.max
           import kotlin.math.min
@@ -245,16 +244,6 @@ jobs:
               private lateinit var bg: Handler
               private val ui = Handler(Looper.getMainLooper())
               private var guide: GuideView? = null
-              private var guideLp: WindowManager.LayoutParams? = null
-              private var hudView: View? = null
-              private var hudStatus: TextView? = null
-              private var targetSelectMode = false
-              @Volatile private var manualTargetFrac: Float? = null
-              @Volatile private var manualStartRequested = false
-              @Volatile private var currentGap = 0f
-              @Volatile private var currentPlatformWidth = 0f
-              @Volatile private var currentBaseX = 0f
-              @Volatile private var currentCaptureW = 1
               @Volatile private var frames = 0
               private lateinit var nb: Notification.Builder
               private var lastStatusT = 0L
@@ -266,7 +255,7 @@ jobs:
               private var lastRate = 0f
               private var tone: ToneGenerator? = null
               // optional auto mode (presses/releases through TapService)
-              @Volatile private var autoEnabled = false
+              private var autoEnabled = false
               @Volatile private var autoActive = false
               private var autoPressTs = 0L; private var autoBlockUntil = 0L; private var stable = 0
               // "Tower" mode: Fight > Skip > OK
@@ -280,7 +269,7 @@ jobs:
               private val towerNames = arrayOf("waiting", "FIGHT", "SKIP", "OK")
               private val towerCheck = Runnable { towerStep() }
               private var autoWhy = ""
-              @Volatile private var autoHudMessage = "idle"
+              private var lastIdle: GuideState? = null; private var lastGoodTs = 0L; private var jump = 0   // flicker tolerance
               private var rateEst = 295f                // pole growth in capture px/s, learned from your holds
 
               // geometry smoothing / freezing while the pole grows
@@ -295,7 +284,6 @@ jobs:
               private var arm = 0; private var armPrev = 0f
               private var fSy = 0; private var fSy2 = 0
               private var maxLen = 0f; private var lastGrowTs = 0L; private var holdStartTs = 0L
-              private var trackingLostTs = 0L  // grace timer for brief capture/detection dropouts during an auto hold
               private var cooldownUntil = 0L   // ignore "new poles" briefly after a release (the falling pole looks like one)
 
               override fun onBind(i: Intent?): IBinder? = null
@@ -314,9 +302,7 @@ jobs:
                   if (i?.action == "TOGGLE_AUTO") {
                       if (!::nb.isInitialized) { stopSelf(); return START_NOT_STICKY }
                       autoEnabled = !autoEnabled
-                      if (!autoEnabled) { manualStartRequested = false; autoRelease() }
-                      getSharedPreferences("p", MODE_PRIVATE).edit().putBoolean("auto", autoEnabled).apply()
-                      updateHudStatus()
+                      if (!autoEnabled) autoRelease()
                       status("auto " + (if (autoEnabled) "ON" else "OFF"), true)
                       return START_NOT_STICKY
                   }
@@ -350,7 +336,7 @@ jobs:
                       override fun onStop() { status("capture was stopped by the system or another app", true); stopSelf() }
                   }, bg)
 
-                  guide = GuideView(this).also { v ->
+                  guide = GuideView(this).also {
                       val lp = WindowManager.LayoutParams(
                           WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT,
                           WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
@@ -361,11 +347,8 @@ jobs:
                           lp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
                       else if (Build.VERSION.SDK_INT >= 28)
                           lp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
-                      guideLp = lp
-                      v.onTargetTap = { rawX, _ -> selectManualTarget(rawX) }
-                      wm.addView(v, lp)
+                      wm.addView(it, lp)
                   }
-                  createHud()
                   reader = buildReader()
                   vd = projection!!.createVirtualDisplay("cap", capW, capH, resources.displayMetrics.densityDpi,
                       DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, reader!!.surface, null, bg)
@@ -589,22 +572,12 @@ jobs:
                   val minLen = max(10f, W * 0.015f)
                   val ts = img.timestamp
 
-                  // While a pole is growing, keep the geometry measured just before it started.
-                  // During auto mode, tolerate a short detection dropout instead of releasing immediately;
-                  // if tracking does not recover, fall back to the existing drop/reset behavior.
+                  // While a pole is growing, keep the geometry measured just before it started, but give up
+                  // as soon as the platform edge is no longer where we expect it (the scene scrolled).
                   if (fValid) {
                       val edgeOk = stoneAny(fBase - 2, fSy, fSy2) && !stoneAny(fBase + 3, fSy, fSy2)
                       val len = if (edgeOk) tip(fTop, fBase, fRef) else 0f
-                      if (edgeOk && len >= minLen) { trackingLostTs = 0L; hold(ts, len); return }
-                      if (autoActive) {
-                          if (trackingLostTs == 0L) trackingLostTs = ts
-                          if (ts - trackingLostTs <= 250_000_000L) {
-                              publish(GuideState(true, fTop.toFloat(), fBase.toFloat(), fGap + 0.2f * fPw,
-                                  fGap + 0.8f * fPw, fAim, maxLen, 1, fW,
-                                  "tracking unstable; keeping auto press"))
-                              return
-                          }
-                      }
+                      if (edgeOk && len >= minLen) { hold(ts, len); return }
                       dropHold()
                   }
 
@@ -618,6 +591,7 @@ jobs:
                       if (c >= thr) { streak++; if (streak >= need) { ytop = y - need + 1; break } } else streak = 0
                   }
                   if (ytop < 0) {
+                      if (missedFrame(ts)) return
                       resetGeom()
                       // average colour of a sample grid (tells us if the capture is black)
                       var sr = 0L; var sg = 0L; var sb = 0L; var n = 0
@@ -654,10 +628,10 @@ jobs:
                   }
                   if (s >= 0) runs.add(intArrayOf(s, last))
                   val wide = runs.filter { it[1] - it[0] >= max(4f, W * 0.008f) }
-                  if (wide.size < 2) { resetGeom(); publish(GuideState(false, debug = "need 2 platforms: runs=%d %dx%d".format(wide.size, W, H))); return }
+                  if (wide.size < 2) { if (missedFrame(ts)) return; resetGeom(); publish(GuideState(false, debug = "need 2 platforms: runs=%d %dx%d".format(wide.size, W, H))); return }
                   val left = wide[0]; val right = wide[1]
                   val gap = (right[0] - left[1]).toFloat(); val pw = (right[1] - right[0]).toFloat()
-                  if (gap < W * 0.02f) { resetGeom(); publish(GuideState(false, debug = "gap too small")); return }
+                  if (gap < W * 0.02f) { if (missedFrame(ts)) return; resetGeom(); publish(GuideState(false, debug = "gap too small")); return }
 
                   // 2b) the small blue "perfect landing" dot on top of the next platform
                   var sx = 0L; var cnt = 0
@@ -667,16 +641,21 @@ jobs:
                   val dotRel = if (cnt in 2..40) sx.toFloat() / cnt - left[1] - W * 0.004f else -1f
 
                   // 3) average the last few readings (reset if the scene jumped, e.g. scrolling)
-                  if (hist.isNotEmpty() && abs(gap - hist.last()[0]) > W * 0.03f) resetGeom()
+                  if (hist.isNotEmpty()) {
+                      val medGap = hist.map { it[0] }.sorted()[hist.size / 2]
+                      if (abs(gap - medGap) > W * 0.03f) {
+                          jump++
+                          if (jump < 4) { if (missedFrame(ts)) return }      // ignore a lone odd reading
+                          else resetGeom()                                    // consistently different: a new scene
+                      } else jump = 0
+                  }
                   hist.add(floatArrayOf(gap, pw, left[1].toFloat(), ytop.toFloat(), dotRel))
                   if (hist.size > 5) hist.removeAt(0)
                   val m = FloatArray(5) { k ->
                       val v = if (k == 4) hist.map { it[4] }.filter { it > 0f } else hist.map { it[k] }
                       if (v.isEmpty()) -1f else v.average().toFloat()
                   }
-                  currentGap = m[0]; currentPlatformWidth = m[1]; currentBaseX = m[2]; currentCaptureW = W
-                  val manualFrac = manualTargetFrac
-                  val aimNow = if (manualFrac != null) m[0] + manualFrac * m[1] else chooseAim(m)
+                  val aimNow = chooseAim(m)
                   val mTop = m[3].toInt(); val mBase = m[2].toInt()
                   // a bridge lying across the gap means the last round is still playing out
                   fun bridgePresent(): Boolean {
@@ -695,23 +674,15 @@ jobs:
                           if (autoEnabled) "on" else "off", if (autoEnabled) " (" + autoWhy + " " + stable + ")" else ""))
 
                   // 4) is a pole starting to grow? (needs the tip to rise over several frames in a row)
+                  fun pubIdle(l: Float) { val st = idleState(l); lastIdle = st; lastGoodTs = ts; publish(st) }
                   val cur = ref
                   if (cur == null) {
                       ref = buildRef(mTop, mBase); arm = 0; armPrev = 0f; stable = 0
-                      if (manualStartRequested && autoEnabled && !autoActive) {
-                          manualStartRequested = false
-                          startAuto(ts, aimNow, manualFrac != null)
-                      }
-                      publish(idleState(0f)); return
-                  }
-                  // HUD Start deliberately bypasses the usual stability, bridge-present, and cooldown gates.
-                  if (manualStartRequested && autoEnabled && !autoActive) {
-                      manualStartRequested = false
-                      startAuto(ts, aimNow, manualFrac != null)
+                      pubIdle(0f); return
                   }
                   if (ts < cooldownUntil) {
                       ref = buildRef(mTop, mBase); arm = 0; armPrev = 0f; stable = 0
-                      publish(idleState(0f)); return
+                      pubIdle(0f); return
                   }
                   val len = tip(mTop, mBase, cur)
                   if (len >= minLen) {
@@ -738,22 +709,29 @@ jobs:
                               bridgePresent() -> "bridge on screen"
                               else -> "ready"
                           }
-                          stable = if (autoWhy == "ready") stable + 1 else 0
-                          if (stable >= 15) { stable = 0; startAuto(ts, aimNow) }
+                          stable = if (autoWhy == "ready") stable + 1 else max(0, stable - 2)
+                          if (stable >= 12) { stable = 0; startAuto(ts, aimNow) }
                       }
                   }
-                  publish(idleState(len))
+                  pubIdle(len)
               }
 
               /** Aim at the blue dot when it was seen and looks sane, else at aimFrac across the platform. */
               private fun chooseAim(m: FloatArray): Float =
                   if (m[4] > m[0] && m[4] < m[0] + m[1]) m[4] else m[0] + aimFrac * m[1]
 
-              private fun resetGeom() { hist.clear(); ref = null; arm = 0; armPrev = 0f }
+              private fun resetGeom() { hist.clear(); ref = null; arm = 0; armPrev = 0f; lastIdle = null; jump = 0 }
+
+              /** A frame where detection failed or gave an odd reading: keep the last good picture for up to 0.4 s. */
+              private fun missedFrame(ts: Long): Boolean {
+                  val g = lastIdle ?: return false
+                  if (fValid || ts - lastGoodTs > 400_000_000L) return false
+                  publish(g); return true
+              }
 
               private fun resetHold() { tsN.clear(); lsN.clear(); cued = false; played.fill(false) }
 
-              private fun dropHold() { autoRelease(); fValid = false; trackingLostTs = 0L; resetHold(); ref = null; arm = 0; armPrev = 0f }
+              private fun dropHold() { autoRelease(); fValid = false; resetHold(); ref = null; arm = 0; armPrev = 0f }
 
               /** Called for every frame while the pole is growing. */
               private fun hold(ts: Long, len: Float) {
@@ -805,52 +783,23 @@ jobs:
                   getSharedPreferences("p", MODE_PRIVATE).edit().putFloat("lead", leadMs).apply()
               }
 
-              private fun autoRelease() {
-                  if (autoActive) {
-                      autoActive = false
-                      TapService.instance?.release()
-                      autoHudMessage = "released"
-                      updateHudStatus()
-                  }
-              }
+              private fun autoRelease() { if (autoActive) { autoActive = false; TapService.instance?.release() } }
 
-              private fun startAuto(ts: Long, aim: Float, manualTarget: Boolean = false) {
-                  if (autoActive) {
-                      autoHudMessage = "press active"
-                      updateHudStatus()
-                      return
-                  }
+              private fun startAuto(ts: Long, aim: Float) {
                   val svc = TapService.instance
                   if (svc == null) {
-                      autoHudMessage = "FAILED: accessibility service is off"
-                      status("auto failed: turn on the Bridge Helper accessibility service", true)
-                      autoBlockUntil = ts + 3_000_000_000L
-                      updateHudStatus()
-                      return
+                      status("auto: turn on the Bridge Helper accessibility service", true)
+                      autoBlockUntil = ts + 3_000_000_000L; return
                   }
                   val (sw, sh) = screenSize()
-                  // Press in empty sky on the right; the game accepts a hold anywhere in this area.
-                  val pressed = svc.press(max(sw, sh) * 0.92f, min(sw, sh) * 0.55f)
-                  if (!pressed) {
-                      autoHudMessage = "FAILED: accessibility rejected press"
-                      status("auto failed: accessibility service rejected the press", true)
-                      autoBlockUntil = ts + 3_000_000_000L
-                      updateHudStatus()
-                      return
+                  // press in empty sky on the right: "press anywhere" works in the game and misses the result-screen buttons
+                  if (svc.press(max(sw, sh) * 0.92f, min(sw, sh) * 0.55f)) {
+                      autoActive = true; autoPressTs = ts
+                      // the hero hides the first ~50px of pole, so for short aims release by time; otherwise only a safety net
+                      val ms = aim / rateEst * 1000f
+                      val delay = if (aim < 100f) ms - 50f else ms + 400f
+                      bg.postDelayed({ if (autoActive && ts == autoPressTs) autoRelease() }, max(30f, delay).toLong())
                   }
-                  autoActive = true; autoPressTs = ts
-                  autoHudMessage = "PRESS ACTIVE"
-                  status("auto press started; target length %.0f px".format(aim), true)
-                  updateHudStatus()
-                  // The hero hides the first part of the pole; timer is a safety fallback to the measured release logic.
-                  val ms = aim / rateEst * 1000f
-                  val delay = if (manualTarget) ms + 400f else if (aim < 100f) ms - 50f else ms + 400f
-                  bg.postDelayed({ if (autoActive && ts == autoPressTs) {
-                      autoRelease()
-                      autoHudMessage = "released (timer safety)"
-                      status("auto press released by timer safety", true)
-                      updateHudStatus()
-                  } }, max(30f, delay).toLong())
               }
 
               private fun beep(release: Boolean) {
@@ -864,143 +813,13 @@ jobs:
                   if (Build.VERSION.SDK_INT >= 26) v.vibrate(VibrationEffect.createOneShot(ms, amp)) else v.vibrate(ms)
               }
 
-              private fun publish(s: GuideState) {
-                  val f = frames
-                  status("f=$f ${s.debug}")
-                  ui.post {
-                      guide?.let {
-                          it.state = s; it.frames = f
-                          val frac = manualTargetFrac
-                          it.targetXNorm = if (frac != null && currentCaptureW > 1)
-                              (currentBaseX + currentGap + frac * currentPlatformWidth) / currentCaptureW else -1f
-                          it.invalidate()
-                      }
-                      updateHudStatus()
-                  }
-              }
-
-              private fun createHud() {
-                  val d = resources.displayMetrics.density
-                  val root = LinearLayout(this).apply {
-                      orientation = LinearLayout.VERTICAL
-                      setPadding((8*d).toInt(), (6*d).toInt(), (8*d).toInt(), (6*d).toInt())
-                      setBackgroundColor(Color.argb(220, 25, 25, 25))
-                  }
-                  hudStatus = TextView(this).apply {
-                      setTextColor(Color.WHITE); textSize = 12f
-                      text = "Bridge HUD · target: automatic"
-                  }
-                  root.addView(hudStatus)
-                  fun addButton(label: String, action: () -> Unit) {
-                      root.addView(Button(this).apply {
-                          text = label; isAllCaps = false
-                          setOnClickListener { action() }
-                      }, LinearLayout.LayoutParams((150*d).toInt(), (42*d).toInt()))
-                  }
-                  addButton("Set target on platform") {
-                      if (currentPlatformWidth <= 0f || currentCaptureW <= 1) {
-                          status("target: wait until the next platform is visible", true)
-                      } else {
-                          targetSelectMode = true
-                          guideLp?.let { lp ->
-                              lp.flags = lp.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
-                              guide?.let { runCatching { wm.updateViewLayout(it, lp) } }
-                          }
-                          status("target: tap a point on the next platform", true)
-                          updateHudStatus()
-                      }
-                  }
-                  addButton("USE AUTO TARGET") {
-                      manualTargetFrac = null
-                      targetSelectMode = false
-                      guideLp?.let { lp ->
-                          lp.flags = lp.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
-                          guide?.let { runCatching { wm.updateViewLayout(it, lp) } }
-                      }
-                      updateHudStatus()
-                      status("target: automatic calculation", true)
-                  }
-                  addButton("START AUTO") {
-                      if (autoActive) {
-                          status("auto already running", true)
-                      } else {
-                          autoEnabled = true
-                          autoBlockUntil = 0L; stable = 0
-                          getSharedPreferences("p", MODE_PRIVATE).edit().putBoolean("auto", true).apply()
-                          // Use the most recently measured geometry immediately; only wait for a frame if no valid geometry exists yet.
-                          val frac = manualTargetFrac
-                          val gap = currentGap
-                          val width = currentPlatformWidth
-                          if (gap > 0f && width > 0f && currentCaptureW > 1) {
-                              manualStartRequested = false
-                              val aim = if (frac != null) gap + frac * width else gap + aimFrac * width
-                              autoHudMessage = "starting"
-                              status(if (frac != null) "HUD start: manual target" else "HUD start: automatic target", true)
-                              bg.post { startAuto(SystemClock.elapsedRealtimeNanos(), aim, frac != null) }
-                          } else {
-                              manualStartRequested = true
-                              autoHudMessage = "waiting for platform geometry"
-                              status("auto waiting: need visible, detected platforms to calculate target length", true)
-                          }
-                          updateHudStatus()
-                      }
-                  }
-                  addButton("STOP AUTO") {
-                      autoEnabled = false; manualStartRequested = false; autoRelease()
-                      autoHudMessage = "OFF"
-                      getSharedPreferences("p", MODE_PRIVATE).edit().putBoolean("auto", false).apply()
-                      status("HUD stop: auto OFF", true); updateHudStatus()
-                  }
-                  hudView = root
-                  val lp = WindowManager.LayoutParams(
-                      WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT,
-                      WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-                      WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
-                      PixelFormat.TRANSLUCENT)
-                  lp.gravity = Gravity.TOP or Gravity.START
-                  lp.x = (8*d).toInt(); lp.y = (40*d).toInt()
-                  runCatching { wm.addView(root, lp) }.onFailure { status("HUD unavailable: ${it.javaClass.simpleName}", true) }
-              }
-
-              private fun updateHudStatus() {
-                  ui.post {
-                      val target = if (manualTargetFrac != null) "manual %.0f%%".format(manualTargetFrac!! * 100f) else "automatic"
-                      val activity = when {
-                          autoActive -> "PRESS ACTIVE"
-                          manualStartRequested -> "WAITING FOR GEOMETRY"
-                          autoEnabled -> autoHudMessage
-                          else -> "OFF"
-                      }
-                      hudStatus?.text = "Bridge HUD · target: $target · $activity${if (targetSelectMode) " · tap platform" else ""}"
-                  }
-              }
-
-              private fun selectManualTarget(rawX: Float): Boolean {
-                  val (sw, sh) = screenSize()
-                  val xCap = rawX / max(sw, sh).toFloat() * currentCaptureW
-                  val left = currentBaseX + currentGap
-                  val right = left + currentPlatformWidth
-                  if (currentPlatformWidth <= 0f || xCap < left || xCap > right) {
-                      status("target: tap inside the next platform", true)
-                      return false
-                  }
-                  manualTargetFrac = ((xCap - left) / currentPlatformWidth).coerceIn(0f, 1f)
-                  targetSelectMode = false
-                  guideLp?.let { lp ->
-                      lp.flags = lp.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
-                      guide?.let { runCatching { wm.updateViewLayout(it, lp) } }
-                  }
-                  updateHudStatus()
-                  status("manual target set: %.0f%% across next platform".format(manualTargetFrac!! * 100f), true)
-                  return true
-              }
+              private fun publish(s: GuideState) { val f = frames; status("f=$f ${s.debug}"); ui.post { guide?.let { it.state = s; it.frames = f; it.invalidate() } } }
 
               override fun onDestroy() {
                   autoRelease()
                   tone?.release()
                   vd?.release(); reader?.close(); projection?.stop()
                   guide?.let { runCatching { wm.removeView(it) } }
-                  hudView?.let { runCatching { wm.removeView(it) } }
                   if (::ht.isInitialized) ht.quitSafely()
                   super.onDestroy()
               }
@@ -1013,13 +832,6 @@ jobs:
               private val paint = Paint().apply { isAntiAlias = true }
               private val dbg = Paint().apply { color = Color.WHITE; textSize = 11 * d; setShadowLayer(4f, 0f, 0f, Color.BLACK) }
               private val loc = IntArray(2)
-              @Volatile var targetXNorm = -1f
-              var onTargetTap: ((Float, Float) -> Boolean)? = null
-
-              override fun onTouchEvent(event: MotionEvent): Boolean {
-                  if (event.action == MotionEvent.ACTION_UP) onTargetTap?.invoke(event.rawX, event.rawY)
-                  return true
-              }
 
               @Suppress("DEPRECATION")
               private fun displayWidth(): Int {
@@ -1032,13 +844,6 @@ jobs:
               override fun onDraw(cv: Canvas) {
                   val s = state; val w = width.toFloat(); val h = height.toFloat()
                   cv.drawText("f=$frames ${s.debug}", 8 * d, h - 8 * d, dbg)
-                  if (targetXNorm >= 0f) {
-                      paint.style = Paint.Style.STROKE; paint.strokeWidth = 2 * d; paint.color = Color.MAGENTA
-                      val tx = targetXNorm * w
-                      cv.drawLine(tx, 0f, tx, h, paint)
-                      paint.style = Paint.Style.FILL
-                      cv.drawCircle(tx, h * 0.5f, 7 * d, paint)
-                  }
                   if (!s.ok) return
 
                   // capture pixel -> pixel inside this window (the window may not start at the screen's corner)
