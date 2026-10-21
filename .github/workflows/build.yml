@@ -280,6 +280,7 @@ jobs:
               private val towerNames = arrayOf("waiting", "FIGHT", "SKIP", "OK")
               private val towerCheck = Runnable { towerStep() }
               private var autoWhy = ""
+              @Volatile private var autoHudMessage = "idle"
               private var rateEst = 295f                // pole growth in capture px/s, learned from your holds
 
               // geometry smoothing / freezing while the pole grows
@@ -804,23 +805,52 @@ jobs:
                   getSharedPreferences("p", MODE_PRIVATE).edit().putFloat("lead", leadMs).apply()
               }
 
-              private fun autoRelease() { if (autoActive) { autoActive = false; TapService.instance?.release() } }
+              private fun autoRelease() {
+                  if (autoActive) {
+                      autoActive = false
+                      TapService.instance?.release()
+                      autoHudMessage = "released"
+                      updateHudStatus()
+                  }
+              }
 
               private fun startAuto(ts: Long, aim: Float, manualTarget: Boolean = false) {
+                  if (autoActive) {
+                      autoHudMessage = "press active"
+                      updateHudStatus()
+                      return
+                  }
                   val svc = TapService.instance
                   if (svc == null) {
-                      status("auto: turn on the Bridge Helper accessibility service", true)
-                      autoBlockUntil = ts + 3_000_000_000L; return
+                      autoHudMessage = "FAILED: accessibility service is off"
+                      status("auto failed: turn on the Bridge Helper accessibility service", true)
+                      autoBlockUntil = ts + 3_000_000_000L
+                      updateHudStatus()
+                      return
                   }
                   val (sw, sh) = screenSize()
-                  // press in empty sky on the right: "press anywhere" works in the game and misses the result-screen buttons
-                  if (svc.press(max(sw, sh) * 0.92f, min(sw, sh) * 0.55f)) {
-                      autoActive = true; autoPressTs = ts
-                      // the hero hides the first ~50px of pole, so for short aims release by time; otherwise only a safety net
-                      val ms = aim / rateEst * 1000f
-                      val delay = if (manualTarget) ms + 400f else if (aim < 100f) ms - 50f else ms + 400f
-                      bg.postDelayed({ if (autoActive && ts == autoPressTs) autoRelease() }, max(30f, delay).toLong())
+                  // Press in empty sky on the right; the game accepts a hold anywhere in this area.
+                  val pressed = svc.press(max(sw, sh) * 0.92f, min(sw, sh) * 0.55f)
+                  if (!pressed) {
+                      autoHudMessage = "FAILED: accessibility rejected press"
+                      status("auto failed: accessibility service rejected the press", true)
+                      autoBlockUntil = ts + 3_000_000_000L
+                      updateHudStatus()
+                      return
                   }
+                  autoActive = true; autoPressTs = ts
+                  autoHudMessage = "PRESS ACTIVE"
+                  status("auto press started; target length %.0f px".format(aim), true)
+                  updateHudStatus()
+                  // The hero hides the first part of the pole; timer is a safety fallback to the measured release logic.
+                  val ms = aim / rateEst * 1000f
+                  val delay = if (manualTarget) ms + 400f else if (aim < 100f) ms - 50f else ms + 400f
+                  bg.postDelayed({ if (autoActive && ts == autoPressTs) {
+                      autoRelease()
+                      autoHudMessage = "released (timer safety)"
+                      status("auto press released by timer safety", true)
+                      updateHudStatus()
+                  } }, max(30f, delay).toLong())
               }
 
               private fun beep(release: Boolean) {
@@ -895,15 +925,29 @@ jobs:
                           status("auto already running", true)
                       } else {
                           autoEnabled = true
-                          manualStartRequested = true
                           autoBlockUntil = 0L; stable = 0
                           getSharedPreferences("p", MODE_PRIVATE).edit().putBoolean("auto", true).apply()
-                          status(if (manualTargetFrac != null) "HUD start: using manual target" else "HUD start: using automatic target", true)
+                          // Use the most recently measured geometry immediately; only wait for a frame if no valid geometry exists yet.
+                          val frac = manualTargetFrac
+                          val gap = currentGap
+                          val width = currentPlatformWidth
+                          if (gap > 0f && width > 0f && currentCaptureW > 1) {
+                              manualStartRequested = false
+                              val aim = if (frac != null) gap + frac * width else gap + aimFrac * width
+                              autoHudMessage = "starting"
+                              status(if (frac != null) "HUD start: manual target" else "HUD start: automatic target", true)
+                              bg.post { startAuto(SystemClock.elapsedRealtimeNanos(), aim, frac != null) }
+                          } else {
+                              manualStartRequested = true
+                              autoHudMessage = "waiting for platform geometry"
+                              status("auto waiting: need visible, detected platforms to calculate target length", true)
+                          }
                           updateHudStatus()
                       }
                   }
                   addButton("STOP AUTO") {
                       autoEnabled = false; manualStartRequested = false; autoRelease()
+                      autoHudMessage = "OFF"
                       getSharedPreferences("p", MODE_PRIVATE).edit().putBoolean("auto", false).apply()
                       status("HUD stop: auto OFF", true); updateHudStatus()
                   }
@@ -921,7 +965,13 @@ jobs:
               private fun updateHudStatus() {
                   ui.post {
                       val target = if (manualTargetFrac != null) "manual %.0f%%".format(manualTargetFrac!! * 100f) else "automatic"
-                      hudStatus?.text = "Bridge HUD · target: $target · auto: ${if (autoEnabled) "ON" else "OFF"}${if (targetSelectMode) " · tap platform" else ""}"
+                      val activity = when {
+                          autoActive -> "PRESS ACTIVE"
+                          manualStartRequested -> "WAITING FOR GEOMETRY"
+                          autoEnabled -> autoHudMessage
+                          else -> "OFF"
+                      }
+                      hudStatus?.text = "Bridge HUD · target: $target · $activity${if (targetSelectMode) " · tap platform" else ""}"
                   }
               }
 
