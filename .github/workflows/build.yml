@@ -147,13 +147,13 @@ jobs:
                   lead = num(prefs.getFloat("lead", 100f)); root.addView(lead, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
                   root.addView(tv("Countdown beats: 3 evenly spaced beeps/buzzes, then release on the 4th beat. Spacing in ms (0 = off)."))
                   beat = num(prefs.getFloat("beat", 150f)); root.addView(beat, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
-                  root.addView(tv("Short bridges (hero hides the pole) use a fixed-length press. Adjust it in ms: + if the bridge comes out short, - if too long."))
+                  root.addView(tv("Fixed-length hold (used for short bridges, or if a normal hold does not work). Adjust in ms: + if the bridge comes out short, - if too long. It also learns after each round."))
                   timedAdj = num(prefs.getFloat("timedAdj", 0f)); root.addView(timedAdj, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
                   root.addView(tv("Aim point on the next platform, 0.0 = near edge, 0.5 = middle, 1.0 = far edge."))
                   aim = num(prefs.getFloat("aim", 0.5f)); root.addView(aim, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
 
                   autoBox = CheckBox(this).apply {
-                      text = "Auto mode: taps for you (needs the accessibility service). Tower mode only taps when this is on."; isChecked = prefs.getBoolean("auto", false)
+                      text = "Auto mode: holds and releases for you (needs the accessibility service). It holds at once, then waits for the next platform plus 10 s before holding again."; isChecked = prefs.getBoolean("auto", false)
                   }
                   root.addView(autoBox)
                   root.addView(btn("Open accessibility settings") { startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)) })
@@ -261,7 +261,13 @@ jobs:
               // optional auto mode (presses/releases through TapService)
               private var autoEnabled = false
               @Volatile private var autoActive = false
-              private var autoPressTs = 0L; private var autoBlockUntil = 0L; private var stable = 0
+              // auto flow: 0 = ready to hold, 1 = holding, 2 = released, waiting for the next platform
+              private var autoState = 0
+              private var readyAtMs = 0L; private var releasedAtMs = 0L; private var pressedAtMs = 0L
+              private var pressGap = 0f; private var pressPw = 0f; private var pressBase = 0f
+              private var retries = 0
+              private var useTimed = false; private var pressTimed = false   // fixed-length press instead of press-and-release
+              @Volatile private var autoToken = 0L
               // "Tower" mode: Fight > Skip > OK
               private var towerMode = false
               @Volatile private var tClass = 0           // 0 waiting, 1 FIGHT, 2 SKIP, 3 OK
@@ -272,9 +278,6 @@ jobs:
               @Volatile private var tTx = 0f; @Volatile private var tTy = 0f   // where to tap, as fractions of the screen
               private val towerNames = arrayOf("waiting", "FIGHT", "SKIP", "OK")
               private val towerCheck = Runnable { towerStep() }
-              private var autoWhy = ""
-              private var goView: View? = null           // floating GO button (bridge mode)
-              @Volatile private var lastFrameTs = 0L
               private var timedAdjMs = 0f                // fine-tune for the fixed-length press on short bridges
               private var lastIdle: GuideState? = null; private var lastGoodTs = 0L; private var jump = 0   // flicker tolerance
               private var rateEst = 295f                // pole growth in capture px/s, learned from your holds
@@ -309,7 +312,7 @@ jobs:
                   if (i?.action == "TOGGLE_AUTO") {
                       if (!::nb.isInitialized) { stopSelf(); return START_NOT_STICKY }
                       autoEnabled = !autoEnabled
-                      if (!autoEnabled) autoRelease()
+                      if (!autoEnabled) autoRelease() else { autoState = 0; readyAtMs = 0L; retries = 0 }
                       status("auto " + (if (autoEnabled) "ON" else "OFF"), true)
                       return START_NOT_STICKY
                   }
@@ -356,26 +359,6 @@ jobs:
                       else if (Build.VERSION.SDK_INT >= 28)
                           lp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
                       wm.addView(it, lp)
-                  }
-                  if (!towerMode) {
-                      val d = resources.displayMetrics.density
-                      val btn = android.widget.TextView(this).apply {
-                          text = "GO"; setTextColor(Color.WHITE); textSize = 13f; gravity = Gravity.CENTER
-                          background = android.graphics.drawable.GradientDrawable().apply {
-                              shape = android.graphics.drawable.GradientDrawable.OVAL; setColor(Color.argb(210, 0, 150, 60))
-                          }
-                          setOnClickListener { bg.post { goNow() } }
-                      }
-                      val sz = (50 * d).toInt()
-                      val glp = WindowManager.LayoutParams(sz, sz, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-                          WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
-                              WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS, PixelFormat.TRANSLUCENT)
-                      glp.gravity = Gravity.TOP or Gravity.START; glp.x = 0; glp.y = (min(screenSize().first, screenSize().second) * 0.45f).toInt()
-                      if (Build.VERSION.SDK_INT >= 30)
-                          glp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
-                      else if (Build.VERSION.SDK_INT >= 28)
-                          glp.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
-                      wm.addView(btn, glp); goView = btn
                   }
                   reader = buildReader()
                   vd = projection!!.createVirtualDisplay("cap", capW, capH, resources.displayMetrics.densityDpi,
@@ -549,7 +532,11 @@ jobs:
               }
 
               private fun analyze(img: Image) {
-                  lastFrameTs = img.timestamp
+                  // the pole never showed up although we held a normal press: switch to the fixed-length press and retry
+                  if (autoActive && !pressTimed && !fValid && SystemClock.elapsedRealtime() - pressedAtMs > 1500L) {
+                      autoRelease(); useTimed = true
+                      retry("no pole appeared, switching to a fixed-length hold")
+                  }
                   if (towerMode) { analyzeTower(img); return }
                   val W = img.width; val H = img.height
                   val pl = img.planes[0]; val buf = pl.buffer; val rs = pl.rowStride
@@ -701,17 +688,17 @@ jobs:
                   fun idleState(len: Float) = GuideState(true, m[3], m[2], m[0] + 0.2f * m[1], m[0] + 0.8f * m[1], aimNow, 0f, 0, W,
                       "bridge gap=%.0f w=%.0f dot=%s tip=%.0f auto=%s%s".format(m[0], m[1], if (m[4] > 0f) "yes" else "no", len,
                           if (autoEnabled) "on" else "off",
-                          if (autoActive) " (PRESSED)" else if (autoEnabled) " (" + autoWhy + " " + stable + ")" else ""))
+                          if (autoEnabled) " (" + autoNote() + ")" else ""))
 
                   // 4) is a pole starting to grow? (needs the tip to rise over several frames in a row)
                   fun pubIdle(l: Float) { val st = idleState(l); lastIdle = st; lastGoodTs = ts; publish(st) }
                   val cur = ref
                   if (cur == null) {
-                      ref = buildRef(mTop, mBase); arm = 0; armPrev = 0f; stable = 0
+                      ref = buildRef(mTop, mBase); arm = 0; armPrev = 0f
                       pubIdle(0f); return
                   }
                   if (ts < cooldownUntil) {
-                      ref = buildRef(mTop, mBase); arm = 0; armPrev = 0f; stable = 0
+                      ref = buildRef(mTop, mBase); arm = 0; armPrev = 0f
                       pubIdle(0f); return
                   }
                   val len = tip(mTop, mBase, cur)
@@ -728,20 +715,7 @@ jobs:
                   } else { arm = 0; armPrev = 0f }
                   if (arm == 0) ref = buildRef(mTop, mBase)   // absorb static clutter, but not a pole that is rising
                   resetHold()
-                  // optional auto mode: press once the scene has been calm for a moment; the release happens in hold()
-                  if (autoActive && !fValid && ts - autoPressTs > 1_500_000_000L) { autoRelease(); autoBlockUntil = ts + 3_000_000_000L }
-                  if (autoEnabled) {
-                      if (!autoActive) {
-                          autoWhy = when {
-                              arm != 0 || len >= minLen -> "pole?"
-                              ts < autoBlockUntil -> "blocked"
-                              bridgePresent() -> "bridge on screen"
-                              else -> "ready"
-                          }
-                          stable = if (autoWhy == "ready") stable + 1 else max(0, stable - 2)
-                          if (stable >= 12) { stable = 0; startAuto(ts, aimNow) }
-                      }
-                  }
+                  if (autoEnabled) autoTick(m[0], m[1], m[2], aimNow, W)
                   pubIdle(len)
               }
 
@@ -808,44 +782,85 @@ jobs:
                   val timeErrMs = (finalLen - aim) / lastRate * 1000f
                   if (abs(timeErrMs) > 500f) return                  // ignore wild outliers (e.g. you let go on purpose)
                   if (lastRate in 100f..1000f) rateEst = rateEst * 0.7f + lastRate * 0.3f
-                  leadMs = (leadMs + 0.4f * timeErrMs).coerceIn(30f, 400f)
-                  getSharedPreferences("p", MODE_PRIVATE).edit().putFloat("lead", leadMs).apply()
+                  val prefs = getSharedPreferences("p", MODE_PRIVATE)
+                  if (pressTimed) {            // a fixed-length press that ended too long / short: change its length next time
+                      timedAdjMs = (timedAdjMs - 0.5f * timeErrMs).coerceIn(-300f, 300f)
+                      prefs.edit().putFloat("timedAdj", timedAdjMs).apply()
+                  } else {
+                      leadMs = (leadMs + 0.4f * timeErrMs).coerceIn(30f, 400f)
+                      prefs.edit().putFloat("lead", leadMs).apply()
+                  }
               }
 
-              private fun autoRelease() { if (autoActive) { autoActive = false; TapService.instance?.release() } }
+              private fun autoRelease() {
+                  if (autoActive) {
+                      autoActive = false
+                      TapService.instance?.release()
+                      if (autoState == 1) { autoState = 2; releasedAtMs = SystemClock.elapsedRealtime() }
+                  }
+              }
 
-              private fun startAuto(ts: Long, aim: Float) {
+              private fun autoNote(): String {
+                  val now = SystemClock.elapsedRealtime()
+                  return when (autoState) {
+                      0 -> if (now < readyAtMs) "hold in " + ((readyAtMs - now) / 1000 + 1) + "s" else "ready"
+                      1 -> "HOLDING" + (if (pressTimed) " (timed)" else "")
+                      else -> "waiting for next platform " + ((now - releasedAtMs) / 1000) + "s"
+                  }
+              }
+
+              /** Called with the platform picture while no pole is being tracked. */
+              private fun autoTick(gap: Float, pw: Float, base: Float, aim: Float, W: Int) {
+                  val now = SystemClock.elapsedRealtime()
+                  when (autoState) {
+                      0 -> if (now >= readyAtMs && !autoActive && hist.size >= 3) {
+                          if (startAuto(aim, now)) { autoState = 1; pressGap = gap; pressPw = pw; pressBase = base }
+                      }
+                      2 -> {
+                          val changed = abs(gap - pressGap) > W * 0.025f || abs(pw - pressPw) > W * 0.025f || abs(base - pressBase) > W * 0.025f
+                          if (changed) {                       // the screen moved on: a new platform is here
+                              autoState = 0; readyAtMs = now + 10_000L; retries = 0
+                              status("new platform seen: next hold in 10 s", true)
+                          } else if (now - releasedAtMs > 8_000L) {
+                              retry("nothing changed after the hold")
+                          }
+                      }
+                  }
+              }
+
+              private fun retry(why: String) {
+                  retries++
+                  if (retries > 4) { autoEnabled = false; autoState = 0; status("auto: $why, tried 5 times, auto turned off", true); return }
+                  autoState = 0; readyAtMs = SystemClock.elapsedRealtime() + 1500L
+                  status("auto: $why, trying again ($retries)", true)
+              }
+
+              /** Press and hold at once. A normal press is released when the pole reaches the aim; short bridges use a fixed time. */
+              private fun startAuto(aim: Float, now: Long): Boolean {
                   val svc = TapService.instance
                   if (svc == null) {
                       status("auto: turn on the Bridge Helper accessibility service", true)
-                      autoBlockUntil = ts + 3_000_000_000L; return
+                      readyAtMs = now + 3000L; return false
                   }
                   val (sw, sh) = screenSize()
-                  // press in empty sky on the right: "press anywhere" works in the game
-                  val x = max(sw, sh) * 0.92f; val y = min(sw, sh) * 0.55f
+                  val x = max(sw, sh) * 0.92f; val y = min(sw, sh) * 0.55f   // empty sky: "press anywhere" works in the game
                   val ms = aim / rateEst * 1000f
-                  if (aim < 100f) {
-                      // short bridge: the hero hides the pole, so press for a fixed time and let the system lift the finger
-                      val dur = max(40L, (ms + timedAdjMs).toLong())
-                      if (svc.holdFor(x, y, dur)) {
-                          autoActive = true; autoPressTs = ts; autoBlockUntil = ts + 3_500_000_000L
-                          bg.postDelayed({ if (autoActive && ts == autoPressTs) autoActive = false }, dur + 150)
-                          status("pressed for $dur ms (aim ${aim.toInt()})", true)
-                      } else status("press was refused by Android", true)
-                  } else if (svc.press(x, y)) {
-                      autoActive = true; autoPressTs = ts
-                      // visual release happens in hold(); this timer is only a safety net
-                      bg.postDelayed({ if (autoActive && ts == autoPressTs) autoRelease() }, max(30f, ms + 400f).toLong())
-                      status("pressing, will release at aim ${aim.toInt()}", true)
-                  } else status("press was refused by Android", true)
-              }
-
-              /** The GO button: press right now, skipping every readiness check. The target is already on screen. */
-              private fun goNow() {
-                  val st = lastIdle
-                  if (st == null || !st.ok || st.aim <= 0f) { status("GO: no target yet", true); return }
-                  if (autoActive || fValid) { status("GO: already holding", true); return }
-                  startAuto(lastFrameTs, st.aim)
+                  pressTimed = useTimed || aim < 100f
+                  pressedAtMs = now; autoToken = now
+                  val token = now
+                  if (pressTimed) {
+                      val dur = max(60L, (ms + timedAdjMs).toLong())
+                      if (!svc.holdFor(x, y, dur)) { status("press was refused by Android", true); readyAtMs = now + 3000L; return false }
+                      autoActive = true
+                      bg.postDelayed({ if (autoActive && autoToken == token) autoRelease() }, dur + 150)   // the stroke ends by itself
+                      status("holding for $dur ms (aim ${aim.toInt()})", true)
+                  } else {
+                      if (!svc.press(x, y)) { status("press was refused by Android", true); readyAtMs = now + 3000L; return false }
+                      autoActive = true
+                      bg.postDelayed({ if (autoActive && autoToken == token) autoRelease() }, max(400f, ms + 600f).toLong())  // safety net
+                      status("holding, will release at aim ${aim.toInt()}", true)
+                  }
+                  return true
               }
 
               private fun beep(release: Boolean) {
@@ -866,7 +881,6 @@ jobs:
                   tone?.release()
                   vd?.release(); reader?.close(); projection?.stop()
                   guide?.let { runCatching { wm.removeView(it) } }
-                  goView?.let { runCatching { wm.removeView(it) } }
                   if (::ht.isInitialized) ht.quitSafely()
                   super.onDestroy()
               }
