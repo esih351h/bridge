@@ -4932,6 +4932,8 @@ jobs:
           import android.Manifest
           import android.app.Activity
           import android.content.Intent
+          import android.content.res.ColorStateList
+          import android.graphics.Color
           import android.media.projection.MediaProjectionManager
           import android.net.Uri
           import android.os.Build
@@ -4996,36 +4998,62 @@ jobs:
               private fun needsRequirements() = !Settings.canDrawOverlays(this) || !isAccessibilityEnabled()
 
               private fun showHome() {
-                  selectedMode = prefs.getString("defaultMode", "bridge") ?: "bridge"
+                  selectedMode = prefs.getString("mode", prefs.getString("defaultMode", "bridge")) ?: "bridge"
                   val root = page("A Helper")
-                  root.addView(tv("Choose a mode or start with your saved default."))
-                  root.addView(btn("Bridge Mode" + if (selectedMode == "bridge") "  • Default" else "") { showSettings("bridge") })
-                  root.addView(btn("Tower Mode" + if (selectedMode == "tower") "  • Default" else "") { showSettings("tower") })
-                  if (needsRequirements()) root.addView(btn("Requirements — action needed") { showRequirements() })
-                  val autoOn = prefs.getBoolean("auto", false)
-                  root.addView(btn(if (autoOn) "Auto: ON  •  Turn OFF" else "Auto: OFF  •  Turn ON") {
-                      val next = !prefs.getBoolean("auto", false)
-                      prefs.edit().putBoolean("auto", next).putBoolean("bridge_auto", next).putBoolean("tower_auto", next).apply()
-                      val svc = Intent(this, OverlayService::class.java).setAction("TOGGLE_AUTO")
-                      if (prefs.getBoolean("automation_running", false)) startService(svc)
+                  root.addView(tv("Active mode: " + if (selectedMode == "tower") "Tower Mode" else "Bridge Mode"))
+                  root.addView(btn("Bridge Mode") {
+                      prefs.edit().putString("mode", "bridge").apply()
+                      selectedMode = "bridge"
+                      if (prefs.getBoolean("automation_running", false))
+                          startService(Intent(this, OverlayService::class.java).setAction("SET_MODE"))
+                      showSettings("bridge")
+                  })
+                  root.addView(btn("Tower Mode") {
+                      selectedMode = "tower"
+                      prefs.edit().putString("mode", "tower").putBoolean("auto", true).apply()
+                      if (prefs.getBoolean("automation_running", false))
+                          startService(Intent(this, OverlayService::class.java).setAction("SET_MODE"))
                       showHome()
                   })
+                  if (needsRequirements()) root.addView(btn("Requirements — action needed") { showRequirements() })
+                  val autoOn = selectedMode == "tower" || prefs.getBoolean("auto", false)
+                  val autoButton = btn("Auto") {
+                      if (selectedMode == "tower") {
+                          // Tower Mode requires real auto-tapping; never allow its Auto state to be disabled.
+                          prefs.edit().putBoolean("auto", true).apply()
+                      } else {
+                          val next = !prefs.getBoolean("auto", false)
+                          prefs.edit().putBoolean("auto", next).putBoolean("bridge_auto", next).apply()
+                      }
+                      if (prefs.getBoolean("automation_running", false))
+                          startService(Intent(this, OverlayService::class.java).setAction("SET_MODE"))
+                      showHome()
+                  }
+                  autoButton.backgroundTintList = ColorStateList.valueOf(if (autoOn) Color.rgb(46, 160, 67) else Color.rgb(190, 55, 55))
+                  root.addView(autoButton)
                   val running = prefs.getBoolean("automation_running", false)
                   root.addView(btn(if (running) "Stop" else "Start") {
                       if (prefs.getBoolean("automation_running", false)) {
                           startService(Intent(this, OverlayService::class.java).setAction("STOP_AUTOMATION"))
-                          stopService(Intent(this, OverlayService::class.java))
-                          prefs.edit().putBoolean("automation_running", false).putString("status", "stopped").apply()
+                          prefs.edit().putBoolean("automation_running", false).putString("status", "stopping").apply()
                           showHome()
                       } else if (needsRequirements()) showRequirements()
-                      else startCapture(prefs.getString("defaultMode", "bridge") ?: "bridge")
+                      else startCapture(selectedMode)
                   })
                   root.addView(tv("Status: " + (prefs.getString("status", "not started") ?: "not started")))
               }
 
               private fun showSettings(mode: String) {
                   selectedMode = mode
-                  val root = page(if (mode == "bridge") "Bridge Mode" else "Tower Mode")
+                  if (mode == "tower") {
+                      prefs.edit().putString("mode", "tower").putBoolean("auto", true).apply()
+                      if (prefs.getBoolean("automation_running", false))
+                          startService(Intent(this, OverlayService::class.java).setAction("SET_MODE"))
+                      showHome()
+                      return
+                  }
+                  prefs.edit().putString("mode", "bridge").apply()
+                  val root = page("Bridge Mode")
                   if (mode == "bridge") {
                       root.addView(tv("Hold before next platform (seconds). Default: 5."))
                       holdSeconds = EditText(this).apply {
@@ -5059,8 +5087,6 @@ jobs:
                       val hold = (holdSeconds.text.toString().toIntOrNull() ?: 5).coerceIn(1, 60)
                       val a = (aim.text.toString().toFloatOrNull() ?: 0.5f).coerceIn(0f, 1f)
                       edit.putInt("bridge_hold_seconds", hold).putFloat("bridge_aim", a).putFloat("aim", a)
-                  } else {
-                      edit.putInt("tower_delay_after_click", towerDelay.selectedItemPosition.coerceIn(0, 1))
                   }
                   edit.apply()
                   Toast.makeText(this, "Settings saved", Toast.LENGTH_SHORT).show()
@@ -5091,7 +5117,7 @@ jobs:
                       .putFloat("timedAdj", prefs.getFloat(prefix + "timedAdj", prefs.getFloat("timedAdj", 0f)))
                       .putFloat("pressX", prefs.getFloat(prefix + "pressX", prefs.getFloat("pressX", 52f)))
                       .putFloat("pressY", prefs.getFloat(prefix + "pressY", prefs.getFloat("pressY", 45f)))
-                      .putBoolean("auto", prefs.getBoolean("auto", false))
+                      .putBoolean("auto", if (mode == "tower") true else prefs.getBoolean("auto", false))
                       .putString("mode", mode).apply()
                   if (!Settings.canDrawOverlays(this)) {
                       Toast.makeText(this, "Grant overlay permission first", Toast.LENGTH_LONG).show()
@@ -5226,19 +5252,23 @@ jobs:
                       stopSelf()
                       return START_NOT_STICKY
                   }
-                  if (i?.action == "TOGGLE_AUTO") {
+                  if (i?.action == "TOGGLE_AUTO" || i?.action == "SET_MODE") {
                       if (!::nb.isInitialized) { stopSelf(); return START_NOT_STICKY }
-                      autoEnabled = getSharedPreferences("p", MODE_PRIVATE).getBoolean("auto", false)
-                      getSharedPreferences("p", MODE_PRIVATE).edit().putBoolean("auto", autoEnabled).apply()
+                      val prefs = getSharedPreferences("p", MODE_PRIVATE)
+                      towerMode = prefs.getString("mode", "bridge") == "tower"
+                      autoEnabled = if (towerMode) true else prefs.getBoolean("auto", false)
+                      prefs.edit().putBoolean("auto", autoEnabled).apply()
                       if (!autoEnabled) autoRelease() else { autoState = 0; readyAtMs = 0L; retries = 0 }
-                      status("auto " + (if (autoEnabled) "ON" else "OFF"), true)
+                      status((if (towerMode) "Tower Mode" else "Bridge Mode") + " • Auto " + (if (autoEnabled) "ON" else "OFF"), true)
                       return START_NOT_STICKY
                   }
                   if (i?.action == "CHANGE_MODE") {
-                      towerMode = !towerMode
-                      getSharedPreferences("p", MODE_PRIVATE).edit().putString("mode", if (towerMode) "tower" else "bridge").apply()
+                      towerMode = getSharedPreferences("p", MODE_PRIVATE).getString("mode", "bridge") != "tower"
+                      autoEnabled = if (towerMode) true else getSharedPreferences("p", MODE_PRIVATE).getBoolean("auto", false)
+                      getSharedPreferences("p", MODE_PRIVATE).edit()
+                          .putString("mode", if (towerMode) "tower" else "bridge").putBoolean("auto", autoEnabled).apply()
                       autoRelease(); autoState = 0; readyAtMs = 0L; retries = 0
-                      status("mode changed to " + if (towerMode) "Tower Mode" else "Bridge Mode", true)
+                      status((if (towerMode) "Tower Mode" else "Bridge Mode") + " • Auto " + (if (autoEnabled) "ON" else "OFF"), true)
                       return START_NOT_STICKY
                   }
                   if (i == null || projection != null) return START_NOT_STICKY
@@ -5263,11 +5293,12 @@ jobs:
                   val prefs = getSharedPreferences("p", MODE_PRIVATE)
                   leadMs = prefs.getFloat("lead", 100f); aimFrac = prefs.getFloat("aim", 0.5f).coerceIn(0f, 1f)
                   beatMs = prefs.getFloat("beat", 150f).coerceIn(0f, 400f)
-                  autoEnabled = prefs.getBoolean("auto", false)
+                  towerMode = prefs.getString("mode", "bridge") == "tower"
+                  autoEnabled = if (towerMode) true else prefs.getBoolean("auto", false)
+                  if (towerMode) prefs.edit().putBoolean("auto", true).apply()
                   timedAdjMs = prefs.getFloat("timedAdj", 0f)
                   pressFx = (prefs.getFloat("pressX", 52f) / 100f).coerceIn(0.05f, 0.95f)
                   pressFy = (prefs.getFloat("pressY", 45f) / 100f).coerceIn(0.05f, 0.95f)
-                  towerMode = prefs.getString("mode", "bridge") == "tower"
                   tone = try { ToneGenerator(AudioManager.STREAM_MUSIC, 100) } catch (_: Exception) { null }
 
                   ht = HandlerThread("cap").also { it.start() }; bg = Handler(ht.looper)
@@ -5340,6 +5371,10 @@ jobs:
               private class Blob(val xc: Float, val yc: Float, val h: Float, val w: Float, val fill: Float)
 
               private fun analyzeTower(img: Image) {
+                  if (!autoEnabled) {
+                      autoEnabled = true
+                      getSharedPreferences("p", MODE_PRIVATE).edit().putBoolean("auto", true).apply()
+                  }
                   val W = img.width; val H = img.height
                   val pl = img.planes[0]; val buf = pl.buffer; val rs = pl.rowStride
                   fun px(x: Int, y: Int, k: Int) = buf.get(y * rs + x * 4 + k).toInt() and 255
@@ -5445,11 +5480,10 @@ jobs:
                   }
                   if (cls == lastTapClass) sameTap++ else { lastTapClass = cls; sameTap = 1 }
                   if (sameTap > 3) {
-                      autoEnabled = false; sameTap = 0; lastTapClass = 0
-                      getSharedPreferences("p", MODE_PRIVATE).edit()
-                          .putBoolean("auto", false).putBoolean("bridge_auto", false).putBoolean("tower_auto", false)
-                          .putString("status", "tower: stuck on ${towerNames[cls]}, auto turned off").apply()
-                      status("tower: stuck on ${towerNames[cls]}, auto turned off", true)
+                      // A stable screen can legitimately need repeated taps. Pause briefly, but never disable Tower Auto.
+                      sameTap = 0; lastTapClass = 0
+                      pauseUntilMs = now + 700L
+                      status("tower: waiting on ${towerNames[cls]} • Auto ON", true)
                       return
                   }
                   val (sw, sh) = screenSize()
