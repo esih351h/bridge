@@ -1560,7 +1560,7 @@ jobs:
               val red = Color.parseColor("#E5484D")
 
               fun load(c: Context) {
-                  val key = c.getSharedPreferences("p", MODE_PRIVATE).getString("theme", "ocean") ?: "ocean"
+                  val key = c.getSharedPreferences("p", Context.MODE_PRIVATE).getString("theme", "ocean") ?: "ocean"
                   val t = Themes.byKey(c, key)
                   themeKey = t.key; bgTop = t.bgTop; bgBottom = t.bgBottom; card = t.card; field = t.field
                   blue = t.bridge; purple = t.tower; teal = t.accent; start = t.start
