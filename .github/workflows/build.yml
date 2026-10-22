@@ -8,11 +8,11 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/setup-java@v5
+      - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: 17
-      - uses: gradle/actions/setup-gradle@v6
+      - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: 8.7
       - name: Create project files
@@ -74,6 +74,7 @@ jobs:
                   <activity android:name=".BridgeSettingsActivity" android:exported="false" />
                   <activity android:name=".TowerSettingsActivity" android:exported="false" />
                   <activity android:name=".RequirementsActivity" android:exported="false" />
+                  <activity android:name=".ThemesActivity" android:exported="false" />
                   <activity android:name=".ThemesActivity" android:exported="false" />
                   <service android:name=".OverlayService" android:exported="false"
                       android:foregroundServiceType="mediaProjection" />
@@ -1268,8 +1269,7 @@ jobs:
               }
 
               /** required rows show a red "Needed"; optional rows only say "Optional" until they are set. */
-              private fun row(title: String, desc: String, ok: Boolean?, button: String? = null, action: (() -> Unit)? = null) {
-                  val required = ok == false
+              private fun row(title: String, desc: String, ok: Boolean?, required: Boolean, button: String?, action: (() -> Unit)?) {
                   val c = card()
                   val head = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
                   head.addView(label(title, 16f, bold = true), LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
@@ -1281,7 +1281,7 @@ jobs:
                   c.addView(head)
                   c.addView(label(desc, 12f, Ui.muted).apply { setPadding(0, dp(4), 0, dp(if (button != null) 10 else 0)) })
                   if (button != null && action != null) {
-                      val btn = bigButton(button, if (ok == true) Ui.green else Ui.teal, 14f, 46) { action() }
+                      val btn = bigButton(button, if (ok == true) Ui.req else Ui.accent, 14f, 46) { action() }
                       (btn.layoutParams as LinearLayout.LayoutParams).bottomMargin = 0
                       c.addView(btn)
                   }
