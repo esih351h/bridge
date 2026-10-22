@@ -1281,7 +1281,7 @@ jobs:
                   c.addView(head)
                   c.addView(label(desc, 12f, Ui.muted).apply { setPadding(0, dp(4), 0, dp(if (button != null) 10 else 0)) })
                   if (button != null && action != null) {
-                      val btn = bigButton(button, if (ok == true) Ui.req else Ui.accent, 14f, 46) { action() }
+                      val btn = bigButton(button, if (ok == true) Ui.teal else Ui.blue, 14f, 46) { action() }
                       (btn.layoutParams as LinearLayout.LayoutParams).bottomMargin = 0
                       c.addView(btn)
                   }
@@ -1293,39 +1293,40 @@ jobs:
                   list.addView(sectionTitle("REQUIRED"))
 
                   row("Display over other apps", "Lets OL Helper draw the guide on top of the game.",
-                      Settings.canDrawOverlays(this), "Open setting") {
+                      Settings.canDrawOverlays(this), true, "Open setting") {
                       startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
                   }
 
                   row("Accessibility service", "Lets OL Helper press and release the screen for you. In Accessibility open Downloaded apps, tap OL Helper auto-tap and turn it on. If the switch is greyed out, allow restricted settings (see Optional below).",
-                      Prefs.accessibilityOn(this), "Open accessibility settings") {
+                      Prefs.accessibilityOn(this), true, "Open accessibility settings") {
                       startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
                   }
 
                   list.addView(sectionTitle("OPTIONAL"))
 
                   row("Allow restricted settings", "If the accessibility switch is greyed out: open App info, tap the three dots at the top right and choose Allow restricted settings.",
-                      null, "Open app info") {
+                      null, false, "Open app info") {
                       startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
                   }
 
                   val notifOk = Build.VERSION.SDK_INT < 33 ||
                       checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
                   row("Notifications", "Shows the live status and the Auto on/off button while OL Helper runs.",
-                      notifOk, "Allow notifications") {
+                      notifOk, false, "Allow notifications") {
                       if (Build.VERSION.SDK_INT >= 33) requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 2)
                   }
 
                   val pm = getSystemService(POWER_SERVICE) as PowerManager
                   row("Battery: no restrictions", "Stops the phone from shutting OL Helper down in the background. Also turn on Autostart for it in the app settings.",
-                      pm.isIgnoringBatteryOptimizations(packageName), "Open battery settings") {
+                      pm.isIgnoringBatteryOptimizations(packageName), false, "Open battery settings") {
                       startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
                   }
 
-                  row("Screen capture", "Android asks every time you press Start. Choose Entire screen, not a single app.", null, null, null)
+                  row("Screen capture", "Android asks every time you press Start. Choose Entire screen, not a single app.",
+                      null, false, null, null)
 
                   row("Keep it from being turned off", "On Xiaomi / Poco phones, clearing recent apps turns accessibility services off. Open Recents, press and hold the OL Helper card and tap the lock icon. Installing an update also turns the service off, so switch it on again afterwards.",
-                      null, null, null)
+                      null, false, null, null)
               }
           }
           BH_EOF
@@ -1801,7 +1802,18 @@ jobs:
       - name: Accept SDK licenses
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
       - name: Build debug APK
-        run: gradle assembleDebug --no-daemon
+        run: |
+          set -o pipefail
+          gradle assembleDebug --no-daemon 2>&1 | tee build.log
+      - name: Show build errors (only if the build failed)
+        if: failure()
+        run: |
+          {
+            echo "## Build failed - copy these lines to Claude"
+            echo '```'
+            grep -E "^e: |AAPT|error:|What went wrong" -A2 build.log | head -80
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Rename APK
         run: cp app/build/outputs/apk/debug/app-debug.apk OL-Helper.apk
       - name: Publish APK to Releases
