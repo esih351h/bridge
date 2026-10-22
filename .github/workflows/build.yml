@@ -14,7 +14,7 @@ jobs:
           java-version: 17
       - uses: gradle/actions/setup-gradle@v6
         with:
-          gradle-version: 8.7
+          gradle-version: 9.8.2
       - name: Create project files
         run: |
           mkdir -p "$(dirname settings.gradle.kts)"
