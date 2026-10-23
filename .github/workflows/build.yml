@@ -8,6 +8,8 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
+      - name: Version
+        run: echo "build.yml version - Perfect memory"
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -75,7 +77,7 @@ jobs:
                   <activity android:name=".TowerSettingsActivity" android:exported="false" />
                   <activity android:name=".RequirementsActivity" android:exported="false" />
                   <activity android:name=".ThemesActivity" android:exported="false" />
-                  <activity android:name=".ThemesActivity" android:exported="false" />
+                  <activity android:name=".PerfectBookActivity" android:exported="false" />
                   <service android:name=".OverlayService" android:exported="false"
                       android:foregroundServiceType="mediaProjection" />
                   <service android:name=".TapService" android:exported="true"
@@ -94,6 +96,7 @@ jobs:
           package com.example.bridgehelper
 
           import android.app.Activity
+          import android.content.Intent
           import android.graphics.Color
           import android.graphics.Typeface
           import android.os.Bundle
@@ -114,6 +117,8 @@ jobs:
               private lateinit var content: LinearLayout
               private var timedSw: Switch? = null
               private var timed = true
+              private var perfSw: Switch? = null
+              private var perf = true
               private var current = "general"
 
               override fun onCreate(b: Bundle?) {
@@ -121,6 +126,7 @@ jobs:
                   val p = Prefs.of(this)
                   for (o in Prefs.BRIDGE) values[o.key] = Prefs.fmt(p.getFloat(o.key, o.def))
                   timed = p.getBoolean("timedAlways", true)
+                  perf = p.getBoolean("perfMem", true)
 
                   val col = buildScreen("Bridge Mode", true)
                   col.addView(label("General settings apply to both ways of playing. Manual and Auto each have their own.", 13f, Ui.muted)
@@ -170,28 +176,37 @@ jobs:
               private fun capture() {
                   for ((k, e) in live) values[k] = e.text.toString()
                   timedSw?.let { timed = it.isChecked }
+                  perfSw?.let { perf = it.isChecked }
               }
 
               private fun showTab(tab: String, grab: Boolean) {
                   if (grab) capture()
                   current = tab
-                  content.removeAllViews(); live.clear(); timedSw = null
+                  content.removeAllViews(); live.clear(); timedSw = null; perfSw = null
                   if (tab == "auto") {
                       val (c, sw) = switchField("Fixed-length hold",
                           "Press for a calculated time and let the system lift the finger. Most accurate, and it learns from where each bridge lands.",
                           timed, "auto")
                       timedSw = sw; content.addView(c)
+                      val (c2, sw2) = switchField("Perfect memory",
+                          "Remembers the hold time of every Perfect (x2) and reuses it for similar bridges. A close stored match replaces the calculated hold.",
+                          perf, "auto")
+                      perfSw = sw2; content.addView(c2)
                   }
                   for (o in Prefs.BRIDGE.filter { it.tab == tab }) {
                       val (c, et) = numberField(o, values[o.key]?.toFloatOrNull() ?: o.def)
                       live[o.key] = et; content.addView(c)
                   }
+                  if (tab == "auto")
+                      content.addView(bigButton("Perfect book (" + PerfBook.load(this).size + ")", Ui.purple, 16f, 56) {
+                          startActivity(Intent(this, PerfectBookActivity::class.java))
+                      })
                   updateTabLooks()
               }
 
               private fun resetTab() {
                   for (o in Prefs.BRIDGE.filter { it.tab == current }) values[o.key] = Prefs.fmt(o.def)
-                  if (current == "auto") timed = true
+                  if (current == "auto") { timed = true; perf = true }
                   showTab(current, false)
                   Toast.makeText(this, "This tab is back to default", Toast.LENGTH_SHORT).show()
               }
@@ -204,7 +219,12 @@ jobs:
                       if (o.key == "holdWait") v = v.coerceIn(0f, 60f)
                       e.putFloat(o.key, v)
                   }
-                  e.putBoolean("auto_bridge", autoSw.isChecked).putBoolean("timedAlways", timed).apply()
+                  e.putBoolean("auto_bridge", autoSw.isChecked).putBoolean("timedAlways", timed).putBoolean("perfMem", perf).apply()
+              }
+
+              override fun onResume() {
+                  super.onResume()
+                  if (current == "auto") showTab("auto", true)   // refresh the Perfect book count after coming back
               }
 
               override fun onPause() { super.onPause(); save() }
@@ -434,6 +454,11 @@ jobs:
               private var timedAdjMs = 0f                // fine-tune for the fixed-length press on short bridges
               private var lastIdle: GuideState? = null; private var lastGoodTs = 0L; private var jump = 0   // flicker tolerance
               private var rateEst = 295f                // pole growth in capture px/s, learned from your holds
+              // Perfect memory (auto only): hold times that gave a Perfect (x2) are saved and reused for similar bridges
+              private var perfMemOn = true; private var pmTol = 3f
+              private var usedKey: Float? = null; private var usedHow = ""
+              private var perfectWatch = false; private var perfectSeen = false
+              private var bookSize = 0
 
               // geometry smoothing / freezing while the pole grows
               private val hist = ArrayList<FloatArray>()
@@ -495,6 +520,9 @@ jobs:
                   autoEnabled = if (towerMode) prefs.getBoolean("auto_tower", true) else prefs.getBoolean("auto_bridge", true)
                   timedAlways = prefs.getBoolean("timedAlways", true)
                   rateEst = prefs.getFloat("rateEst", 295f).coerceIn(150f, 500f)
+                  perfMemOn = prefs.getBoolean("perfMem", true)
+                  pmTol = prefs.getFloat("pmTol", 3f).coerceIn(0.5f, 10f)
+                  bookSize = PerfBook.load(this).size
                   tFightWait = prefs.getFloat("tFightWait", 2500f).toLong(); tSkipWait = prefs.getFloat("tSkipWait", 2500f).toLong()
                   tOkWait = prefs.getFloat("tOkWait", 1500f).toLong(); tStuck = prefs.getFloat("tStuck", 3f).toInt().coerceAtLeast(1)
                   prefs.edit().putBoolean("running", true).apply()
@@ -851,7 +879,7 @@ jobs:
                   fun idleState(len: Float) = GuideState(true, m[3], m[2], m[0] + 0.2f * m[1], m[0] + 0.8f * m[1], aimNow, 0f, 0, W,
                       "bridge gap=%.0f w=%.0f dot=%s tip=%.0f auto=%s%s".format(m[0], m[1], if (m[4] > 0f) "yes" else "no", len,
                           if (autoEnabled) "on" else "off",
-                          if (autoEnabled) " (" + autoNote() + ")" else ""))
+                          (if (autoEnabled) " (" + autoNote() + ")" else "") + (if (perfMemOn && autoEnabled) " book=" + bookSize else "")))
 
                   // 4) is a pole starting to grow? (needs the tip to rise over several frames in a row)
                   // right end of a fallen pole lying across the gap (rows around the platform top); -1 if none
@@ -868,8 +896,21 @@ jobs:
                       }
                       return best
                   }
+                  // the gold "Perfect!" text that pops up above the dot (a band above the platform, centred on the dot)
+                  fun perfectGold(): Boolean {
+                      val dotX = pressBase + W * 0.004f + pressAim
+                      val x0 = max(0, (dotX - W * 0.05f).toInt()); val x1 = min(W - 1, (dotX + W * 0.05f).toInt())
+                      val y0 = max(0, (mTop - H * 0.27f).toInt()); val y1 = min(H - 1, (mTop - H * 0.16f).toInt())
+                      var n = 0
+                      for (y in y0..y1) for (x in x0..x1) {
+                          val rr = r(x, y); val gg = g(x, y); val bb = b(x, y)
+                          if (rr >= 200 && gg >= 150 && bb <= 120 && rr - bb >= 100) n++
+                      }
+                      return n >= 25
+                  }
                   if (autoState == 2 && SystemClock.elapsedRealtime() - releasedAtMs <= 3500L) {
                       val tx = bridgeTip(); if (tx > bridgeTipMax) bridgeTipMax = tx
+                      if (perfectWatch && !perfectSeen && perfectGold()) perfectSeen = true
                   }
                   fun pubIdle(l: Float) { val st = idleState(l); lastIdle = st; lastGoodTs = ts; publish(st) }
                   val cur = ref
@@ -1001,11 +1042,26 @@ jobs:
                   status("bridge ended " + abs(off) + " px " + (if (off > 0) "long" else "short") + ", hold adjust now " + timedAdjMs.toInt() + " ms", true)
               }
 
+              /** The round is over: save the hold if it was a Perfect, or count a miss against the stored hold that was reused. */
+              private fun finishPerfect() {
+                  if (!perfectWatch) return
+                  perfectWatch = false
+                  if (!perfMemOn || !pressTimed || pressDur <= 0L) return
+                  val key = usedKey
+                  if (perfectSeen) {
+                      bookSize = PerfBook.recordPerfect(this, pressAim, pressGap, pressPw, pressDur.toFloat())
+                      status("PERFECT! saved: distance " + pressAim.toInt() + " px, hold " + pressDur + " ms (" + bookSize + " in the book)", true)
+                  } else if (key != null) {
+                      bookSize = PerfBook.recordMiss(this, key)
+                      status("not a Perfect: the stored hold missed (" + bookSize + " in the book)", true)
+                  }
+              }
+
               private fun autoRelease() {
                   if (autoActive) {
                       autoActive = false
                       TapService.instance?.release()
-                      if (autoState == 1) { autoState = 2; releasedAtMs = SystemClock.elapsedRealtime(); bridgeTipMax = -1 }
+                      if (autoState == 1) { autoState = 2; releasedAtMs = SystemClock.elapsedRealtime(); bridgeTipMax = -1; perfectWatch = true; perfectSeen = false }
                   }
               }
 
@@ -1028,10 +1084,12 @@ jobs:
                       2 -> {
                           val changed = abs(gap - pressGap) > W * 0.025f || abs(pw - pressPw) > W * 0.025f || abs(base - pressBase) > W * 0.025f
                           if (changed) {                       // the screen moved on: a new platform is here
+                              finishPerfect()
                               finishLanding(W)
                               autoState = 0; readyAtMs = now + holdWaitMs; retries = 0
                               status("new platform seen: next hold in %.1f s".format(holdWaitMs / 1000f), true)
                           } else if (now - releasedAtMs > 8_000L) {
+                              finishPerfect()
                               finishLanding(W)
                               retry("nothing changed after the hold")
                           }
@@ -1058,14 +1116,20 @@ jobs:
                   val ms = aim / rateEst * 1000f
                   pressTimed = useTimed || timedAlways || aim < 100f
                   pressAim = aim
+                  usedKey = null; usedHow = ""
                   pressedAtMs = now; autoToken = now
                   val token = now
                   if (pressTimed) {
-                      val dur = max(60L, (ms + timedAdjMs).toLong()); pressDur = dur
+                      var dur = max(60L, (ms + timedAdjMs).toLong())
+                      if (perfMemOn) {
+                          val sg = PerfBook.suggest(this, aim, pmTol, rateEst)
+                          if (sg != null) { dur = max(60L, sg.dur.toLong()); usedKey = sg.key; usedHow = sg.how }
+                      }
+                      pressDur = dur
                       if (!svc.holdFor(x, y, dur)) { status("press was refused by Android", true); readyAtMs = now + 3000L; return false }
                       autoActive = true
                       bg.postDelayed({ if (autoActive && autoToken == token) autoRelease() }, dur + 150)   // the stroke ends by itself
-                      status("holding at ${x.toInt()},${y.toInt()} for $dur ms (aim ${aim.toInt()})", true)
+                      status("holding at ${x.toInt()},${y.toInt()} for $dur ms (aim ${aim.toInt()})" + (if (usedHow.isNotEmpty()) " [from the book: $usedHow]" else ""), true)
                   } else {
                       if (!svc.press(x, y)) { status("press was refused by Android", true); readyAtMs = now + 3000L; return false }
                       autoActive = true
@@ -1173,6 +1237,137 @@ jobs:
               }
           }
           BH_EOF
+          mkdir -p "$(dirname app/src/main/java/com/example/bridgehelper/PerfectBook.kt)"
+          cat > app/src/main/java/com/example/bridgehelper/PerfectBook.kt <<'BH_EOF'
+          package com.example.bridgehelper
+
+          import android.content.Context
+          import java.util.Locale
+          import kotlin.math.abs
+
+          /**
+           * Hold times that produced a Perfect (x2), kept between sessions.
+           * Everything is keyed by the distance from the pole base to the blue dot ("aim", in capture pixels):
+           * that distance decides how long the hold has to be, so different gap/width combinations with the same distance share an answer.
+           */
+          object PerfBook {
+              class Entry(var aim: Float, var gap: Float, var w: Float, var dur: Float, var count: Int, var miss: Int)
+
+              /** dur = suggested hold in ms; key = aim of the stored entry when it was reused as is (so a miss can be counted against it). */
+              class Suggest(val dur: Float, val key: Float?, val how: String)
+
+              private const val KEY = "perfBook"
+              private const val MAX = 300
+
+              fun load(c: Context): MutableList<Entry> {
+                  val s = Prefs.of(c).getString(KEY, "") ?: ""
+                  val out = ArrayList<Entry>()
+                  for (part in s.split(';')) {
+                      val f = part.split('|')
+                      if (f.size != 6) continue
+                      val a = f[0].toFloatOrNull(); val g = f[1].toFloatOrNull(); val w = f[2].toFloatOrNull()
+                      val d = f[3].toFloatOrNull(); val n = f[4].toIntOrNull(); val m = f[5].toIntOrNull()
+                      if (a == null || g == null || w == null || d == null || n == null || m == null) continue
+                      out.add(Entry(a, g, w, d, n, m))
+                  }
+                  return out
+              }
+
+              private fun save(c: Context, list: List<Entry>) {
+                  val s = list.joinToString(";") {
+                      String.format(Locale.US, "%.2f|%.1f|%.1f|%.1f|%d|%d", it.aim, it.gap, it.w, it.dur, it.count, it.miss)
+                  }
+                  Prefs.of(c).edit().putString(KEY, s).apply()
+              }
+
+              fun clear(c: Context) { Prefs.of(c).edit().remove(KEY).apply() }
+
+              /** The hold time to use for this distance, or null when nothing stored is close enough. */
+              fun suggest(c: Context, aim: Float, tol: Float, rate: Float): Suggest? {
+                  val near = load(c).filter { abs(it.aim - aim) <= tol }
+                  if (near.isEmpty()) return null
+                  val below = near.filter { it.aim <= aim }.maxByOrNull { it.aim }
+                  val above = near.filter { it.aim >= aim }.minByOrNull { it.aim }
+                  if (below != null && above != null && above.aim - below.aim > 0.5f) {
+                      // one Perfect on each side: slide between them
+                      val t = (aim - below.aim) / (above.aim - below.aim)
+                      return Suggest(below.dur + t * (above.dur - below.dur), null, "between two Perfects")
+                  }
+                  val e = near.minByOrNull { abs(it.aim - aim) } ?: return null
+                  if (abs(e.aim - aim) <= 1.5f) return Suggest(e.dur, e.aim, "same bridge as before")
+                  return Suggest(e.dur + (aim - e.aim) / rate * 1000f, null, "close to a Perfect, adjusted")
+              }
+
+              /** A Perfect happened with this hold: remember it (averaging with a matching entry). Returns the book size. */
+              fun recordPerfect(c: Context, aim: Float, gap: Float, w: Float, dur: Float): Int {
+                  val list = load(c)
+                  val e = list.firstOrNull { abs(it.aim - aim) <= 1.0f && abs(it.gap - gap) <= 2f && abs(it.w - w) <= 2f }
+                  if (e != null) {
+                      e.dur = (e.dur * e.count + dur) / (e.count + 1)
+                      e.count += 1; e.miss = 0
+                  } else {
+                      list.add(Entry(aim, gap, w, dur, 1, 0))
+                      while (list.size > MAX) {
+                          val weakest = list.minByOrNull { it.count } ?: break
+                          list.remove(weakest)
+                      }
+                  }
+                  save(c, list)
+                  return list.size
+              }
+
+              /** A stored hold was reused as is, but it was not a Perfect. After two misses in a row it is dropped. */
+              fun recordMiss(c: Context, key: Float): Int {
+                  val list = load(c)
+                  val e = list.firstOrNull { abs(it.aim - key) < 0.01f } ?: return list.size
+                  e.miss += 1
+                  if (e.miss >= 2) list.remove(e)
+                  save(c, list)
+                  return list.size
+              }
+          }
+          BH_EOF
+          mkdir -p "$(dirname app/src/main/java/com/example/bridgehelper/PerfectBookActivity.kt)"
+          cat > app/src/main/java/com/example/bridgehelper/PerfectBookActivity.kt <<'BH_EOF'
+          package com.example.bridgehelper
+
+          import android.app.Activity
+          import android.os.Bundle
+
+          class PerfectBookActivity : Activity() {
+              private var confirm = false
+
+              override fun onCreate(b: Bundle?) {
+                  super.onCreate(b)
+                  val col = buildScreen("Perfect book", true)
+                  val list = PerfBook.load(this).sortedBy { it.aim }
+                  col.addView(label("Hold times that gave a Perfect (x2), saved while Auto plays. A close match is reused instead of the calculated hold. An entry that misses twice in a row is removed.", 13f, Ui.muted)
+                      .apply { setPadding(0, 0, 0, dp(14)) })
+
+                  if (list.isEmpty()) {
+                      val c = card()
+                      c.addView(label("Nothing saved yet. Perfect hits show up here while Auto plays.", 15f))
+                      col.addView(c)
+                  }
+                  for (e in list) {
+                      val c = card()
+                      c.addView(label("Distance to the dot: " + e.aim.toInt() + " px", 16f, bold = true))
+                      c.addView(label("Gap " + e.gap.toInt() + " px   \u00b7   Width " + e.w.toInt() + " px", 13f, Ui.muted))
+                      c.addView(label("Hold " + e.dur.toInt() + " ms   \u00b7   Perfect x" + e.count + (if (e.miss > 0) "   \u00b7   missed once since" else ""), 14f)
+                          .apply { setPadding(0, dp(4), 0, 0) })
+                      col.addView(c)
+                  }
+                  if (list.isNotEmpty()) {
+                      val btn = bigButton("Clear all", Ui.red, 16f, 56) { }
+                      btn.setOnClickListener {
+                          if (!confirm) { confirm = true; btn.text = "Tap again to clear everything" }
+                          else { PerfBook.clear(this); recreate() }
+                      }
+                      col.addView(btn)
+                  }
+              }
+          }
+          BH_EOF
           mkdir -p "$(dirname app/src/main/java/com/example/bridgehelper/Prefs.kt)"
           cat > app/src/main/java/com/example/bridgehelper/Prefs.kt <<'BH_EOF'
           package com.example.bridgehelper
@@ -1192,6 +1387,7 @@ jobs:
                   Opt("rateEst", "Pole growth speed", "How fast the pole grows, in capture pixels per second. Learned automatically.", 295f, "general"),
                   Opt("beat", "Countdown beat spacing (ms)", "Three beeps, then release on the 4th. 0 turns the beeps off.", 150f, "manual"),
                   Opt("holdWait", "Wait before each hold (seconds)", "After a new platform appears, wait this long before holding again. 0 = hold at once, up to 60. Counts down in the status line as hold in ...s.", 10f, "auto"),
+                  Opt("pmTol", "Perfect match tolerance (px)", "How close a stored Perfect must be, in distance to the dot, to be reused. About 3 is a good start.", 3f, "auto"),
                   Opt("timedAdj", "Hold time adjust (ms)", "+ if bridges come out short, - if too long. It learns by itself from where each bridge lands.", 0f, "auto"),
                   Opt("pressX", "Press position X (%)", "Where auto presses, as a percent from the left of the screen.", 52f, "auto"),
                   Opt("pressY", "Press position Y (%)", "Percent from the top. The default is the middle of the sky, below the reward bar.", 45f, "auto")
@@ -1209,7 +1405,7 @@ jobs:
               fun resetBridge(c: Context) {
                   val e = of(c).edit()
                   BRIDGE.forEach { e.remove(it.key) }
-                  e.remove("auto_bridge"); e.remove("timedAlways"); e.apply()
+                  e.remove("auto_bridge"); e.remove("timedAlways"); e.remove("perfMem"); e.apply()
               }
 
               fun resetTower(c: Context) {
@@ -1820,5 +2016,5 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: build-${{ github.run_number }}
-          name: OL Helper build ${{ github.run_number }}
+          name: OL Helper build ${{ github.run_number }} (Perfect memory)
           files: OL-Helper.apk
