@@ -1,4 +1,4 @@
-name: Build OL Helper APK
+name: Build A Helper APK
 on:
   push:
   workflow_dispatch:
@@ -9,7 +9,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Version
-        run: echo "build.yml version - Hold and watch, round book, backup, fixed signing key"
+        run: echo "build.yml version - A Helper (Pirate Fairy)"
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -23,7 +23,7 @@ jobs:
           cat > settings.gradle.kts <<'BH_EOF'
           pluginManagement { repositories { google(); mavenCentral(); gradlePluginPortal() } }
           dependencyResolutionManagement { repositories { google(); mavenCentral() } }
-          rootProject.name = "OLHelper"
+          rootProject.name = "AHelper"
           include(":app")
           BH_EOF
           mkdir -p "$(dirname build.gradle.kts)"
@@ -40,16 +40,15 @@ jobs:
               id("org.jetbrains.kotlin.android")
           }
           android {
-              namespace = "com.example.bridgehelper"
+              namespace = "com.ahelper.app"
               compileSdk = 34
               defaultConfig {
-                  applicationId = "com.example.bridgehelper"
+                  applicationId = "com.ahelper.app"
                   minSdk = 26
                   targetSdk = 34
-                  versionCode = 3
-                  versionName = "2.1"
+                  versionCode = 4
+                  versionName = "2.2"
               }
-              // The same key for every build: Android then lets a new build update the installed app and keep its data.
               signingConfigs {
                   create("olhelper") {
                       storeFile = file("ol-helper.p12")
@@ -98,7 +97,7 @@ jobs:
                   <service android:name=".OverlayService" android:exported="false"
                       android:foregroundServiceType="mediaProjection" />
                   <service android:name=".TapService" android:exported="true"
-                      android:label="OL Helper auto-tap"
+                      android:label="A Helper auto-tap"
                       android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
                       <intent-filter>
                           <action android:name="android.accessibilityservice.AccessibilityService" />
@@ -108,14 +107,14 @@ jobs:
               </application>
           </manifest>
           BH_EOF
-          mkdir -p "$(dirname app/src/main/java/com/example/bridgehelper/Backup.kt)"
-          cat > app/src/main/java/com/example/bridgehelper/Backup.kt <<'BH_EOF'
-          package com.example.bridgehelper
+          mkdir -p "$(dirname app/src/main/java/com/ahelper/app/Backup.kt)"
+          cat > app/src/main/java/com/ahelper/app/Backup.kt <<'BH_EOF'
+          package com.ahelper.app
 
           import android.content.Context
           import org.json.JSONObject
 
-          /** Everything OL Helper remembers (settings, learned timing, the book, counters, log) as one small text file. */
+          /** Everything A Helper remembers (settings, learned timing, the book, counters, log) as one small text file. */
           object Backup {
               private val SKIP = setOf("status", "running", "askedNotif", "lastBackup")
 
@@ -141,7 +140,7 @@ jobs:
                   return root.toString(1)
               }
 
-              /** Restores a backup. Returns the number of settings restored, or -1 when the text is not an OL Helper backup. */
+              /** Restores a backup. Returns the number of settings restored, or -1 when the text is not an A Helper backup. */
               fun fromJson(c: Context, text: String): Int {
                   return try {
                       val root = JSONObject(text)
@@ -172,9 +171,9 @@ jobs:
               }
           }
           BH_EOF
-          mkdir -p "$(dirname app/src/main/java/com/example/bridgehelper/BackupActivity.kt)"
-          cat > app/src/main/java/com/example/bridgehelper/BackupActivity.kt <<'BH_EOF'
-          package com.example.bridgehelper
+          mkdir -p "$(dirname app/src/main/java/com/ahelper/app/BackupActivity.kt)"
+          cat > app/src/main/java/com/ahelper/app/BackupActivity.kt <<'BH_EOF'
+          package com.ahelper.app
 
           import android.app.Activity
           import android.content.Intent
@@ -207,7 +206,7 @@ jobs:
 
                   col.addView(bigButton("Export backup", Ui.green, 17f, 60) {
                       val i = Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE)
-                          .setType("application/json").putExtra(Intent.EXTRA_TITLE, "ol-helper-backup.json")
+                          .setType("application/json").putExtra(Intent.EXTRA_TITLE, "a-helper-backup.json")
                       startActivityForResult(i, reqExport)
                   })
                   col.addView(bigButton("Import backup", Ui.blue, 17f, 60) {
@@ -232,7 +231,7 @@ jobs:
                       } else if (req == reqImport) {
                           val text = contentResolver.openInputStream(uri)?.use { it.readBytes().toString(Charsets.UTF_8) } ?: ""
                           val n = Backup.fromJson(this, text)
-                          if (n < 0) Toast.makeText(this, "That file is not an OL Helper backup", Toast.LENGTH_LONG).show()
+                          if (n < 0) Toast.makeText(this, "That file is not an A Helper backup", Toast.LENGTH_LONG).show()
                           else { Toast.makeText(this, "Restored " + n + " items and " + PerfBook.load(this).size + " book entries", Toast.LENGTH_LONG).show(); recreate() }
                       }
                   } catch (e: Exception) {
@@ -241,9 +240,9 @@ jobs:
               }
           }
           BH_EOF
-          mkdir -p "$(dirname app/src/main/java/com/example/bridgehelper/BridgeSettingsActivity.kt)"
-          cat > app/src/main/java/com/example/bridgehelper/BridgeSettingsActivity.kt <<'BH_EOF'
-          package com.example.bridgehelper
+          mkdir -p "$(dirname app/src/main/java/com/ahelper/app/BridgeSettingsActivity.kt)"
+          cat > app/src/main/java/com/ahelper/app/BridgeSettingsActivity.kt <<'BH_EOF'
+          package com.ahelper.app
 
           import android.app.Activity
           import android.content.Intent
@@ -388,9 +387,9 @@ jobs:
               override fun onPause() { super.onPause(); save() }
           }
           BH_EOF
-          mkdir -p "$(dirname app/src/main/java/com/example/bridgehelper/EventLogActivity.kt)"
-          cat > app/src/main/java/com/example/bridgehelper/EventLogActivity.kt <<'BH_EOF'
-          package com.example.bridgehelper
+          mkdir -p "$(dirname app/src/main/java/com/ahelper/app/EventLogActivity.kt)"
+          cat > app/src/main/java/com/ahelper/app/EventLogActivity.kt <<'BH_EOF'
+          package com.ahelper.app
 
           import android.app.Activity
           import android.os.Bundle
@@ -425,9 +424,26 @@ jobs:
               }
           }
           BH_EOF
-          mkdir -p "$(dirname app/src/main/java/com/example/bridgehelper/MainActivity.kt)"
-          cat > app/src/main/java/com/example/bridgehelper/MainActivity.kt <<'BH_EOF'
-          package com.example.bridgehelper
+          mkdir -p "$(dirname app/src/main/java/com/ahelper/app/Fairy.kt)"
+          cat > app/src/main/java/com/ahelper/app/Fairy.kt <<'BH_EOF'
+          package com.ahelper.app
+
+          import android.content.Context
+
+          /** The little pirate fairy above the title. One drawing per theme, same character. */
+          object Fairy {
+              fun drawable(c: Context, themeKey: String): Int = when (themeKey) {
+                  "sunset" -> R.drawable.fairy_sunset
+                  "forest" -> R.drawable.fairy_forest
+                  "violet" -> R.drawable.fairy_violet
+                  "midnight" -> R.drawable.fairy_midnight
+                  else -> R.drawable.fairy_ocean
+              }
+          }
+          BH_EOF
+          mkdir -p "$(dirname app/src/main/java/com/ahelper/app/MainActivity.kt)"
+          cat > app/src/main/java/com/ahelper/app/MainActivity.kt <<'BH_EOF'
+          package com.ahelper.app
 
           import android.Manifest
           import android.app.Activity
@@ -469,9 +485,9 @@ jobs:
                   bar.addView(iconButton(R.drawable.ic_palette, Ui.card, 44) { startActivity(Intent(this, ThemesActivity::class.java)) })
                   col.addView(bar, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
 
-                  col.addView(ImageView(this).apply { setImageResource(R.mipmap.ic_launcher) },
-                      LinearLayout.LayoutParams(dp(104), dp(104)).apply { gravity = Gravity.CENTER_HORIZONTAL })
-                  col.addView(label("OL Helper", 30f, bold = true).apply { gravity = Gravity.CENTER; setPadding(0, dp(10), 0, 0) })
+                  col.addView(ImageView(this).apply { setImageResource(Fairy.drawable(this@MainActivity, Ui.themeKey)) },
+                      LinearLayout.LayoutParams(dp(120), dp(120)).apply { gravity = Gravity.CENTER_HORIZONTAL })
+                  col.addView(label("A Helper", 30f, bold = true).apply { gravity = Gravity.CENTER; setPadding(0, dp(10), 0, 0) })
                   col.addView(label("Mini game assistant", 14f, Ui.muted).apply { gravity = Gravity.CENTER; setPadding(0, 0, 0, dp(22)) })
 
                   // only visible while the overlay permission or the accessibility service is missing
@@ -572,9 +588,9 @@ jobs:
               }
           }
           BH_EOF
-          mkdir -p "$(dirname app/src/main/java/com/example/bridgehelper/OverlayService.kt)"
-          cat > app/src/main/java/com/example/bridgehelper/OverlayService.kt <<'BH_EOF'
-          package com.example.bridgehelper
+          mkdir -p "$(dirname app/src/main/java/com/ahelper/app/OverlayService.kt)"
+          cat > app/src/main/java/com/ahelper/app/OverlayService.kt <<'BH_EOF'
+          package com.ahelper.app
 
           import android.app.*
           import android.content.Context
@@ -708,7 +724,7 @@ jobs:
                   val ch = "ov"
                   (getSystemService(NOTIFICATION_SERVICE) as NotificationManager)
                       .createNotificationChannel(NotificationChannel(ch, "Overlay", NotificationManager.IMPORTANCE_LOW))
-                  nb = Notification.Builder(this, ch).setContentTitle("OL Helper running")
+                  nb = Notification.Builder(this, ch).setContentTitle("A Helper running")
                       .setContentText("starting…").setSmallIcon(android.R.drawable.ic_menu_compass)
                       .addAction(Notification.Action.Builder(
                           Icon.createWithResource(this, android.R.drawable.ic_media_pause), "Auto on/off",
@@ -909,7 +925,7 @@ jobs:
               private fun tapTower(cls: Int, now: Long) {
                   val svc = TapService.instance
                   if (svc == null) {
-                      status("auto: turn on the OL Helper accessibility service", true)
+                      status("auto: turn on the A Helper accessibility service", true)
                       pauseUntilMs = now + 3000; return
                   }
                   if (cls == lastTapClass) sameTap++ else { lastTapClass = cls; sameTap = 1 }
@@ -1439,7 +1455,7 @@ jobs:
               private fun startAuto(aim: Float, now: Long): Boolean {
                   val svc = TapService.instance
                   if (svc == null) {
-                      status("auto: turn on the OL Helper accessibility service", true)
+                      status("auto: turn on the A Helper accessibility service", true)
                       readyAtMs = now + 3000L; return false
                   }
                   val (sw, sh) = screenSize()
@@ -1588,9 +1604,9 @@ jobs:
               }
           }
           BH_EOF
-          mkdir -p "$(dirname app/src/main/java/com/example/bridgehelper/PerfectBook.kt)"
-          cat > app/src/main/java/com/example/bridgehelper/PerfectBook.kt <<'BH_EOF'
-          package com.example.bridgehelper
+          mkdir -p "$(dirname app/src/main/java/com/ahelper/app/PerfectBook.kt)"
+          cat > app/src/main/java/com/ahelper/app/PerfectBook.kt <<'BH_EOF'
+          package com.ahelper.app
 
           import android.content.Context
           import java.util.Locale
@@ -1777,9 +1793,9 @@ jobs:
               fun clear(c: Context) { Prefs.of(c).edit().remove(KEY).apply() }
           }
           BH_EOF
-          mkdir -p "$(dirname app/src/main/java/com/example/bridgehelper/PerfectBookActivity.kt)"
-          cat > app/src/main/java/com/example/bridgehelper/PerfectBookActivity.kt <<'BH_EOF'
-          package com.example.bridgehelper
+          mkdir -p "$(dirname app/src/main/java/com/ahelper/app/PerfectBookActivity.kt)"
+          cat > app/src/main/java/com/ahelper/app/PerfectBookActivity.kt <<'BH_EOF'
+          package com.ahelper.app
 
           import android.app.Activity
           import android.content.Intent
@@ -1862,9 +1878,9 @@ jobs:
               }
           }
           BH_EOF
-          mkdir -p "$(dirname app/src/main/java/com/example/bridgehelper/Prefs.kt)"
-          cat > app/src/main/java/com/example/bridgehelper/Prefs.kt <<'BH_EOF'
-          package com.example.bridgehelper
+          mkdir -p "$(dirname app/src/main/java/com/ahelper/app/Prefs.kt)"
+          cat > app/src/main/java/com/ahelper/app/Prefs.kt <<'BH_EOF'
+          package com.ahelper.app
 
           import android.content.Context
           import android.content.SharedPreferences
@@ -1911,13 +1927,13 @@ jobs:
 
               fun fmt(v: Float): String = if (v == v.toInt().toFloat()) v.toInt().toString() else v.toString()
 
-              /** Is the OL Helper accessibility service switched on in Android settings? */
+              /** Is the A Helper accessibility service switched on in Android settings? */
               fun accessibilityOn(c: Context): Boolean {
                   val s = Settings.Secure.getString(c.contentResolver, Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES) ?: return false
                   return s.split(':').any { it.startsWith(c.packageName + "/") }
               }
 
-              /** The two things OL Helper cannot run without. */
+              /** The two things A Helper cannot run without. */
               fun coreMissing(c: Context): List<String> {
                   val l = ArrayList<String>()
                   if (!Settings.canDrawOverlays(c)) l.add("overlay permission")
@@ -1926,9 +1942,9 @@ jobs:
               }
           }
           BH_EOF
-          mkdir -p "$(dirname app/src/main/java/com/example/bridgehelper/RequirementsActivity.kt)"
-          cat > app/src/main/java/com/example/bridgehelper/RequirementsActivity.kt <<'BH_EOF'
-          package com.example.bridgehelper
+          mkdir -p "$(dirname app/src/main/java/com/ahelper/app/RequirementsActivity.kt)"
+          cat > app/src/main/java/com/ahelper/app/RequirementsActivity.kt <<'BH_EOF'
+          package com.ahelper.app
 
           import android.Manifest
           import android.app.Activity
@@ -1983,12 +1999,12 @@ jobs:
                   list.removeAllViews()
                   list.addView(sectionTitle("REQUIRED"))
 
-                  row("Display over other apps", "Lets OL Helper draw the guide on top of the game.",
+                  row("Display over other apps", "Lets A Helper draw the guide on top of the game.",
                       Settings.canDrawOverlays(this), true, "Open setting") {
                       startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
                   }
 
-                  row("Accessibility service", "Lets OL Helper press and release the screen for you. In Accessibility open Downloaded apps, tap OL Helper auto-tap and turn it on. If the switch is greyed out, allow restricted settings (see Optional below).",
+                  row("Accessibility service", "Lets A Helper press and release the screen for you. In Accessibility open Downloaded apps, tap A Helper auto-tap and turn it on. If the switch is greyed out, allow restricted settings (see Optional below).",
                       Prefs.accessibilityOn(this), true, "Open accessibility settings") {
                       startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
                   }
@@ -2002,13 +2018,13 @@ jobs:
 
                   val notifOk = Build.VERSION.SDK_INT < 33 ||
                       checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
-                  row("Notifications", "Shows the live status and the Auto on/off button while OL Helper runs.",
+                  row("Notifications", "Shows the live status and the Auto on/off button while A Helper runs.",
                       notifOk, false, "Allow notifications") {
                       if (Build.VERSION.SDK_INT >= 33) requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 2)
                   }
 
                   val pm = getSystemService(POWER_SERVICE) as PowerManager
-                  row("Battery: no restrictions", "Stops the phone from shutting OL Helper down in the background. Also turn on Autostart for it in the app settings.",
+                  row("Battery: no restrictions", "Stops the phone from shutting A Helper down in the background. Also turn on Autostart for it in the app settings.",
                       pm.isIgnoringBatteryOptimizations(packageName), false, "Open battery settings") {
                       startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
                   }
@@ -2016,14 +2032,14 @@ jobs:
                   row("Screen capture", "Android asks every time you press Start. Choose Entire screen, not a single app.",
                       null, false, null, null)
 
-                  row("Keep it from being turned off", "On Xiaomi / Poco phones, clearing recent apps turns accessibility services off. Open Recents, press and hold the OL Helper card and tap the lock icon. Installing an update also turns the service off, so switch it on again afterwards.",
+                  row("Keep it from being turned off", "On Xiaomi / Poco phones, clearing recent apps turns accessibility services off. Open Recents, press and hold the A Helper card and tap the lock icon. Installing an update also turns the service off, so switch it on again afterwards.",
                       null, false, null, null)
               }
           }
           BH_EOF
-          mkdir -p "$(dirname app/src/main/java/com/example/bridgehelper/TapService.kt)"
-          cat > app/src/main/java/com/example/bridgehelper/TapService.kt <<'BH_EOF'
-          package com.example.bridgehelper
+          mkdir -p "$(dirname app/src/main/java/com/ahelper/app/TapService.kt)"
+          cat > app/src/main/java/com/ahelper/app/TapService.kt <<'BH_EOF'
+          package com.ahelper.app
 
           import android.accessibilityservice.AccessibilityService
           import android.accessibilityservice.GestureDescription
@@ -2077,9 +2093,9 @@ jobs:
               }
           }
           BH_EOF
-          mkdir -p "$(dirname app/src/main/java/com/example/bridgehelper/ThemesActivity.kt)"
-          cat > app/src/main/java/com/example/bridgehelper/ThemesActivity.kt <<'BH_EOF'
-          package com.example.bridgehelper
+          mkdir -p "$(dirname app/src/main/java/com/ahelper/app/ThemesActivity.kt)"
+          cat > app/src/main/java/com/ahelper/app/ThemesActivity.kt <<'BH_EOF'
+          package com.ahelper.app
 
           import android.app.Activity
           import android.graphics.Color
@@ -2095,7 +2111,7 @@ jobs:
               override fun onCreate(b: Bundle?) {
                   super.onCreate(b)
                   val col = buildScreen("Themes", true)
-                  col.addView(label("Pick a look. It applies everywhere in OL Helper. Green, red and amber keep their meaning in every theme.", 13f, Ui.muted)
+                  col.addView(label("Pick a look. It applies everywhere in A Helper. Green, red and amber keep their meaning in every theme.", 13f, Ui.muted)
                       .apply { setPadding(0, 0, 0, dp(14)) })
                   val current = Prefs.of(this).getString("theme", "ocean")
                   for (t in Themes.all(this)) col.addView(themeCard(t, t.key == current))
@@ -2127,9 +2143,9 @@ jobs:
               }
           }
           BH_EOF
-          mkdir -p "$(dirname app/src/main/java/com/example/bridgehelper/TowerSettingsActivity.kt)"
-          cat > app/src/main/java/com/example/bridgehelper/TowerSettingsActivity.kt <<'BH_EOF'
-          package com.example.bridgehelper
+          mkdir -p "$(dirname app/src/main/java/com/ahelper/app/TowerSettingsActivity.kt)"
+          cat > app/src/main/java/com/ahelper/app/TowerSettingsActivity.kt <<'BH_EOF'
+          package com.ahelper.app
 
           import android.app.Activity
           import android.os.Bundle
@@ -2181,9 +2197,9 @@ jobs:
               override fun onPause() { super.onPause(); save() }
           }
           BH_EOF
-          mkdir -p "$(dirname app/src/main/java/com/example/bridgehelper/Ui.kt)"
-          cat > app/src/main/java/com/example/bridgehelper/Ui.kt <<'BH_EOF'
-          package com.example.bridgehelper
+          mkdir -p "$(dirname app/src/main/java/com/ahelper/app/Ui.kt)"
+          cat > app/src/main/java/com/ahelper/app/Ui.kt <<'BH_EOF'
+          package com.ahelper.app
 
           import android.app.Activity
           import android.content.Context
@@ -2384,45 +2400,6 @@ jobs:
               <path android:fillColor="#FFFFFF" android:fillType="evenOdd" android:pathData="M10.07,5.69 L10.53,2.72 L13.47,2.72 L13.93,5.69 L15.10,6.17 L17.53,4.40 L19.60,6.47 L17.83,8.90 L18.31,10.07 L21.28,10.53 L21.28,13.47 L18.31,13.93 L17.83,15.10 L19.60,17.53 L17.53,19.60 L15.10,17.83 L13.93,18.31 L13.47,21.28 L10.53,21.28 L10.07,18.31 L8.90,17.83 L6.47,19.60 L4.40,17.53 L6.17,15.10 L5.69,13.93 L2.72,13.47 L2.72,10.53 L5.69,10.07 L6.17,8.90 L4.40,6.47 L6.47,4.40 L8.90,6.17 Z M12,8.9 a3.1,3.1 0 1,0 0.01,0 Z" />
           </vector>
           BH_EOF
-          mkdir -p "$(dirname app/src/main/res/drawable/ic_launcher_background.xml)"
-          cat > app/src/main/res/drawable/ic_launcher_background.xml <<'BH_EOF'
-          <?xml version="1.0" encoding="utf-8"?>
-          <shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
-              <gradient android:type="linear" android:angle="270" android:startColor="#F7B8FF" android:endColor="#5836A5" />
-          </shape>
-          BH_EOF
-          mkdir -p "$(dirname app/src/main/res/drawable/ic_launcher_foreground.xml)"
-          cat > app/src/main/res/drawable/ic_launcher_foreground.xml <<'BH_EOF'
-          <?xml version="1.0" encoding="utf-8"?>
-          <vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
-              <!-- Fairy wings -->
-              <path android:fillColor="#FFE8FF" android:pathData="M48,45 C31,22 12,27 20,47 C25,58 38,58 49,54 Z" />
-              <path android:fillColor="#D9F7FF" android:pathData="M60,45 C77,22 96,27 88,47 C83,58 70,58 59,54 Z" />
-              <path android:fillColor="#FFFFFF" android:fillAlpha="0.75" android:pathData="M45,56 C25,49 23,62 39,67 L49,63 Z" />
-              <path android:fillColor="#FFFFFF" android:fillAlpha="0.75" android:pathData="M63,56 C83,49 85,62 69,67 L59,63 Z" />
-              <!-- hair and face -->
-              <path android:fillColor="#6B3B28" android:pathData="M37,34 C37,18 71,18 71,38 L68,54 L40,54 Z" />
-              <path android:fillColor="#FFD9B5" android:pathData="M40,35 C40,22 68,22 68,35 L65,50 C63,59 45,59 43,50 Z" />
-              <path android:fillColor="#6B3B28" android:pathData="M38,38 C35,25 45,20 54,22 C67,19 74,29 70,41 L64,34 L48,35 L40,44 Z" />
-              <path android:fillColor="#3A2854" android:pathData="M47,42 m-2,0 a2,2 0 1,0 4,0 a2,2 0 1,0 -4,0 M59,42 m-2,0 a2,2 0 1,0 4,0 a2,2 0 1,0 -4,0" />
-              <path android:strokeColor="#C76B78" android:strokeWidth="1.5" android:strokeLineCap="round" android:fillColor="#00000000" android:pathData="M50,49 Q54,52 58,49" />
-              <!-- dress and arms -->
-              <path android:fillColor="#9B5DE5" android:pathData="M44,57 L64,57 L73,79 L35,79 Z" />
-              <path android:fillColor="#FFD9B5" android:pathData="M43,59 L33,68 L37,72 L48,65 Z M65,59 L75,68 L71,72 L60,65 Z" />
-              <path android:fillColor="#FFE06B" android:pathData="M42,78 L66,78 L70,84 L38,84 Z" />
-              <!-- wand and sparkle -->
-              <path android:strokeColor="#FFF3B0" android:strokeWidth="3" android:strokeLineCap="round" android:pathData="M72,62 L84,49" />
-              <path android:fillColor="#FFF3B0" android:pathData="M85,38 L88,45 L95,48 L88,51 L85,58 L82,51 L75,48 L82,45 Z" />
-              <path android:fillColor="#FFFFFF" android:pathData="M24,20 L26,25 L31,27 L26,29 L24,34 L22,29 L17,27 L22,25 Z" />
-          </vector>
-          BH_EOF
-          mkdir -p "$(dirname app/src/main/res/drawable/ic_launcher_monochrome.xml)"
-          cat > app/src/main/res/drawable/ic_launcher_monochrome.xml <<'BH_EOF'
-          <?xml version="1.0" encoding="utf-8"?>
-          <vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="108dp" android:height="108dp" android:viewportWidth="108" android:viewportHeight="108">
-              <path android:fillColor="#FFFFFF" android:pathData="M48,45 C31,22 12,27 20,47 C25,58 38,58 49,54 Z M60,45 C77,22 96,27 88,47 C83,58 70,58 59,54 Z M37,34 C37,18 71,18 71,38 L68,54 L40,54 Z M40,35 C40,22 68,22 68,35 L65,50 C63,59 45,59 43,50 Z M44,57 L64,57 L73,79 L35,79 Z M43,59 L33,68 L37,72 L48,65 Z M65,59 L75,68 L71,72 L60,65 Z M42,78 L66,78 L70,84 L38,84 Z M72,62 L84,49 L87,52 L75,65 Z M85,38 L88,45 L95,48 L88,51 L85,58 L82,51 L75,48 L82,45 Z M24,20 L26,25 L31,27 L26,29 L24,34 L22,29 L17,27 L22,25 Z" />
-          </vector>
-          BH_EOF
           mkdir -p "$(dirname app/src/main/res/drawable/ic_palette.xml)"
           cat > app/src/main/res/drawable/ic_palette.xml <<'BH_EOF'
           <?xml version="1.0" encoding="utf-8"?>
@@ -2432,30 +2409,12 @@ jobs:
                   android:pathData="M12,3 a9,9 0 1,0 0,18 a9,9 0 1,0 0,-18 z M7.5,8.6 a1.6,1.6 0 1,0 0,3.2 a1.6,1.6 0 1,0 0,-3.2 z M10.8,5.4 a1.6,1.6 0 1,0 0,3.2 a1.6,1.6 0 1,0 0,-3.2 z M15.2,5.9 a1.6,1.6 0 1,0 0,3.2 a1.6,1.6 0 1,0 0,-3.2 z M17.8,10 a1.6,1.6 0 1,0 0,3.2 a1.6,1.6 0 1,0 0,-3.2 z" />
           </vector>
           BH_EOF
-          mkdir -p "$(dirname app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml)"
-          cat > app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml <<'BH_EOF'
-          <?xml version="1.0" encoding="utf-8"?>
-          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
-              <background android:drawable="@drawable/ic_launcher_background" />
-              <foreground android:drawable="@drawable/ic_launcher_foreground" />
-              <monochrome android:drawable="@drawable/ic_launcher_monochrome" />
-          </adaptive-icon>
-          BH_EOF
-          mkdir -p "$(dirname app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml)"
-          cat > app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml <<'BH_EOF'
-          <?xml version="1.0" encoding="utf-8"?>
-          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
-              <background android:drawable="@drawable/ic_launcher_background" />
-              <foreground android:drawable="@drawable/ic_launcher_foreground" />
-              <monochrome android:drawable="@drawable/ic_launcher_monochrome" />
-          </adaptive-icon>
-          BH_EOF
           mkdir -p "$(dirname app/src/main/res/values/strings.xml)"
           cat > app/src/main/res/values/strings.xml <<'BH_EOF'
           <?xml version="1.0" encoding="utf-8"?>
           <resources>
-              <string name="app_name">OL Helper</string>
-              <string name="tap_desc">Lets OL Helper press and release the screen for you in the mini games. It only taps while OL Helper is running with Auto switched on.</string>
+              <string name="app_name">A Helper</string>
+              <string name="tap_desc">Lets A Helper press and release the screen for you in the mini games. It only taps while A Helper is running with Auto switched on.</string>
           </resources>
           BH_EOF
           mkdir -p "$(dirname app/src/main/res/xml/tap_service.xml)"
@@ -2468,6 +2427,260 @@ jobs:
               android:notificationTimeout="100"
               android:description="@string/tap_desc" />
           BH_EOF
+
+          # --- ICONS AND FAIRIES ---
+          mkdir -p "$(dirname app/src/main/res/drawable/ic_launcher_background.xml)"
+          cat > app/src/main/res/drawable/ic_launcher_background.xml <<'BH_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+              <gradient android:type="linear" android:angle="270" android:startColor="#4FB3FF" android:endColor="#0B4A9C" />
+          </shape>
+          BH_EOF
+
+          mkdir -p "$(dirname app/src/main/res/drawable/ic_launcher_foreground.xml)"
+          cat > app/src/main/res/drawable/ic_launcher_foreground.xml <<'BH_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="108dp" android:height="108dp"
+              android:viewportWidth="32" android:viewportHeight="32">
+              <!-- Hair Back -->
+              <path android:fillColor="#D3E6FF" android:pathData="M12,8 h8 v1 h-8 z M10,9 h12 v2 h-12 z M9,11 h14 v3 h-14 z M10,14 h4 v4 h-4 z M21,14 h1 v1 h-1 z" />
+              <!-- Wings -->
+              <path android:fillColor="#00A3FF" android:pathData="M4,12 h3 v2 h-3 z M3,14 h3 v4 h-3 z M5,18 h2 v2 h-2 z" />
+              <path android:fillColor="#B3E0FF" android:pathData="M5,13 h2 v2 h-2 z M4,15 h2 v3 h-2 z M6,19 h1 v1 h-1 z" />
+              <path android:fillColor="#00A3FF" android:pathData="M25,12 h3 v2 h-3 z M26,14 h3 v4 h-3 z M25,18 h2 v2 h-2 z" />
+              <path android:fillColor="#B3E0FF" android:pathData="M25,13 h2 v2 h-2 z M26,15 h2 v3 h-2 z" />
+              <!-- Dress -->
+              <path android:fillColor="#FFFFFF" android:pathData="M13,17 h6 v1 h-6 z M11,18 h10 v5 h-10 z M12,23 h8 v1 h-8 z M14,24 h4 v1 h-4 z" />
+              <path android:fillColor="#0066CC" android:pathData="M12,19 h1 v3 h-1 z M19,19 h1 v3 h-1 z M15,15 h2 v1 h-2 z M15,22 h2 v1 h-2 z M16,16 h1 v1 h-1 z" />
+              <!-- Face -->
+              <path android:fillColor="#FFD9C0" android:pathData="M12,11 h8 v1 h-8 z M11,12 h10 v4 h-10 z M13,16 h6 v1 h-6 z" />
+              <!-- Hair Front -->
+              <path android:fillColor="#FFFFFF" android:pathData="M11,9 h10 v2 h-10 z M10,11 h2 v2 h-2 z M20,11 h2 v1 h-2 z M13,11 h2 v3 h-2 z M17,11 h3 v2 h-3 z" />
+              <!-- Ahoge -->
+              <path android:fillColor="#FFFFFF" android:pathData="M14,6 h2 v1 h-2 z M15,7 h2 v2 h-2 z" />
+              <!-- Flower -->
+              <path android:fillColor="#33CCFF" android:pathData="M10,9 h2 v1 h-2 z M9,10 h4 v3 h-4 z M10,13 h2 v1 h-2 z" />
+              <path android:fillColor="#FFD700" android:pathData="M10,11 h2 v1 h-2 z" />
+              <!-- Face Details -->
+              <path android:fillColor="#001A33" android:pathData="M12,12 h2 v2 h-2 z M18,12 h2 v2 h-2 z" />
+              <path android:fillColor="#FFFFFF" android:pathData="M13,12 h1 v1 h-1 z M19,12 h1 v1 h-1 z" />
+              <path android:fillColor="#0066CC" android:pathData="M13,13 h1 v1 h-1 z M19,13 h1 v1 h-1 z" />
+              <path android:fillColor="#FF9999" android:pathData="M11,14 h2 v1 h-2 z M19,14 h2 v1 h-2 z" />
+              <path android:fillColor="#FF6666" android:pathData="M15,15 h2 v1 h-2 z" />
+              <!-- Hands & Sleeves -->
+              <path android:fillColor="#FFFFFF" android:pathData="M8,16 h3 v2 h-3 z M21,16 h3 v2 h-3 z" />
+              <path android:fillColor="#FFD9C0" android:pathData="M10,18 h2 v1 h-2 z M20,18 h2 v1 h-2 z" />
+              <!-- Wand -->
+              <path android:fillColor="#FFD700" android:pathData="M21,14 h1 v4 h-1 z" />
+              <path android:fillColor="#FFEA00" android:pathData="M22,15 h2 v2 h-2 z M23,14 h1 v4 h-1 z" />
+              <path android:fillColor="#FFFFFF" android:pathData="M23,15 h1 v2 h-1 z" />
+              <!-- Legs -->
+              <path android:fillColor="#FFD9C0" android:pathData="M14,25 h2 v2 h-2 z M17,25 h2 v2 h-2 z" />
+              <path android:fillColor="#0044AA" android:pathData="M14,27 h2 v1 h-2 z M17,27 h2 v1 h-2 z" />
+              <!-- Sparkles -->
+              <path android:fillColor="#00E5FF" android:pathData="M7,9 h1 v1 h-1 z M25,8 h1 v1 h-1 z M8,22 h1 v1 h-1 z M24,23 h1 v1 h-1 z" />
+              <path android:fillColor="#FFFFFF" android:pathData="M22,10 h1 v1 h-1 z M7,18 h1 v1 h-1 z M25,18 h1 v1 h-1 z" />
+          </vector>
+          BH_EOF
+
+          mkdir -p "$(dirname app/src/main/res/drawable/ic_launcher_monochrome.xml)"
+          cat > app/src/main/res/drawable/ic_launcher_monochrome.xml <<'BH_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="108dp" android:height="108dp"
+              android:viewportWidth="32" android:viewportHeight="32">
+              <path android:fillColor="#FFFFFF" android:pathData="M12,8 h8 v1 h-8 z M10,9 h12 v2 h-12 z M9,11 h14 v3 h-14 z M10,14 h4 v4 h-4 z M21,14 h1 v1 h-1 z M4,12 h3 v2 h-3 z M3,14 h3 v4 h-3 z M5,18 h2 v2 h-2 z M25,12 h3 v2 h-3 z M26,14 h3 v4 h-3 z M25,18 h2 v2 h-2 z M13,17 h6 v1 h-6 z M11,18 h10 v5 h-10 z M12,23 h8 v1 h-8 z M14,24 h4 v1 h-4 z M12,11 h8 v1 h-8 z M11,12 h10 v4 h-10 z M13,16 h6 v1 h-6 z M11,9 h10 v2 h-10 z M10,11 h2 v2 h-2 z M20,11 h2 v1 h-2 z M13,11 h2 v3 h-2 z M17,11 h3 v2 h-3 z M14,6 h2 v1 h-2 z M15,7 h2 v2 h-2 z M8,16 h3 v2 h-3 z M21,16 h3 v2 h-3 z M21,14 h1 v4 h-1 z M22,15 h2 v2 h-2 z M23,14 h1 v4 h-1 z" />
+              <path android:fillColor="#00000000" android:pathData="M10,9 h2 v1 h-2 z M9,10 h4 v3 h-4 z M10,13 h2 v1 h-2 z M10,11 h2 v1 h-2 z M12,12 h2 v2 h-2 z M18,12 h2 v2 h-2 z M11,14 h2 v1 h-2 z M19,14 h2 v1 h-2 z M15,15 h2 v1 h-2 z M23,15 h1 v2 h-1 z M14,25 h2 v2 h-2 z M17,25 h2 v2 h-2 z" />
+          </vector>
+          BH_EOF
+
+          mkdir -p "$(dirname app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml)"
+          cat > app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml <<'BH_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+              <background android:drawable="@drawable/ic_launcher_background" />
+              <foreground android:drawable="@drawable/ic_launcher_foreground" />
+              <monochrome android:drawable="@drawable/ic_launcher_monochrome" />
+          </adaptive-icon>
+          BH_EOF
+
+          mkdir -p "$(dirname app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml)"
+          cat > app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml <<'BH_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+              <background android:drawable="@drawable/ic_launcher_background" />
+              <foreground android:drawable="@drawable/ic_launcher_foreground" />
+              <monochrome android:drawable="@drawable/ic_launcher_monochrome" />
+          </adaptive-icon>
+          BH_EOF
+
+          # --- THEMED FAIRIES ---
+          mkdir -p "$(dirname app/src/main/res/drawable/fairy_ocean.xml)"
+          cat > app/src/main/res/drawable/fairy_ocean.xml <<'BH_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="96dp" android:height="96dp" android:viewportWidth="32" android:viewportHeight="32">
+              <path android:fillColor="#D3E6FF" android:pathData="M12,8 h8 v1 h-8 z M10,9 h12 v2 h-12 z M9,11 h14 v3 h-14 z M10,14 h4 v4 h-4 z M21,14 h1 v1 h-1 z" />
+              <path android:fillColor="#00A3FF" android:pathData="M4,12 h3 v2 h-3 z M3,14 h3 v4 h-3 z M5,18 h2 v2 h-2 z" />
+              <path android:fillColor="#B3E0FF" android:pathData="M5,13 h2 v2 h-2 z M4,15 h2 v3 h-2 z M6,19 h1 v1 h-1 z" />
+              <path android:fillColor="#00A3FF" android:pathData="M25,12 h3 v2 h-3 z M26,14 h3 v4 h-3 z M25,18 h2 v2 h-2 z" />
+              <path android:fillColor="#B3E0FF" android:pathData="M25,13 h2 v2 h-2 z M26,15 h2 v3 h-2 z" />
+              <path android:fillColor="#FFFFFF" android:pathData="M13,17 h6 v1 h-6 z M11,18 h10 v5 h-10 z M12,23 h8 v1 h-8 z M14,24 h4 v1 h-4 z" />
+              <path android:fillColor="#0066CC" android:pathData="M12,19 h1 v3 h-1 z M19,19 h1 v3 h-1 z M15,15 h2 v1 h-2 z M15,22 h2 v1 h-2 z M16,16 h1 v1 h-1 z" />
+              <path android:fillColor="#FFD9C0" android:pathData="M12,11 h8 v1 h-8 z M11,12 h10 v4 h-10 z M13,16 h6 v1 h-6 z" />
+              <path android:fillColor="#FFFFFF" android:pathData="M11,9 h10 v2 h-10 z M10,11 h2 v2 h-2 z M20,11 h2 v1 h-2 z M13,11 h2 v3 h-2 z M17,11 h3 v2 h-3 z" />
+              <path android:fillColor="#FFFFFF" android:pathData="M14,6 h2 v1 h-2 z M15,7 h2 v2 h-2 z" />
+              <path android:fillColor="#33CCFF" android:pathData="M10,9 h2 v1 h-2 z M9,10 h4 v3 h-4 z M10,13 h2 v1 h-2 z" />
+              <path android:fillColor="#FFD700" android:pathData="M10,11 h2 v1 h-2 z" />
+              <path android:fillColor="#001A33" android:pathData="M12,12 h2 v2 h-2 z M18,12 h2 v2 h-2 z" />
+              <path android:fillColor="#FFFFFF" android:pathData="M13,12 h1 v1 h-1 z M19,12 h1 v1 h-1 z" />
+              <path android:fillColor="#0066CC" android:pathData="M13,13 h1 v1 h-1 z M19,13 h1 v1 h-1 z" />
+              <path android:fillColor="#FF9999" android:pathData="M11,14 h2 v1 h-2 z M19,14 h2 v1 h-2 z" />
+              <path android:fillColor="#FF6666" android:pathData="M15,15 h2 v1 h-2 z" />
+              <path android:fillColor="#FFFFFF" android:pathData="M8,16 h3 v2 h-3 z M21,16 h3 v2 h-3 z" />
+              <path android:fillColor="#FFD9C0" android:pathData="M10,18 h2 v1 h-2 z M20,18 h2 v1 h-2 z" />
+              <path android:fillColor="#FFD700" android:pathData="M21,14 h1 v4 h-1 z" />
+              <path android:fillColor="#FFEA00" android:pathData="M22,15 h2 v2 h-2 z M23,14 h1 v4 h-1 z" />
+              <path android:fillColor="#FFFFFF" android:pathData="M23,15 h1 v2 h-1 z" />
+              <path android:fillColor="#FFD9C0" android:pathData="M14,25 h2 v2 h-2 z M17,25 h2 v2 h-2 z" />
+              <path android:fillColor="#0044AA" android:pathData="M14,27 h2 v1 h-2 z M17,27 h2 v1 h-2 z" />
+              <path android:fillColor="#00E5FF" android:pathData="M7,9 h1 v1 h-1 z M25,8 h1 v1 h-1 z M8,22 h1 v1 h-1 z M24,23 h1 v1 h-1 z" />
+              <path android:fillColor="#FFFFFF" android:pathData="M22,10 h1 v1 h-1 z M7,18 h1 v1 h-1 z M25,18 h1 v1 h-1 z" />
+          </vector>
+          BH_EOF
+
+          mkdir -p "$(dirname app/src/main/res/drawable/fairy_sunset.xml)"
+          cat > app/src/main/res/drawable/fairy_sunset.xml <<'BH_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="96dp" android:height="96dp" android:viewportWidth="32" android:viewportHeight="32">
+              <path android:fillColor="#FFCCBC" android:pathData="M12,8 h8 v1 h-8 z M10,9 h12 v2 h-12 z M9,11 h14 v3 h-14 z M10,14 h4 v4 h-4 z M21,14 h1 v1 h-1 z" />
+              <path android:fillColor="#F2762E" android:pathData="M4,12 h3 v2 h-3 z M3,14 h3 v4 h-3 z M5,18 h2 v2 h-2 z" />
+              <path android:fillColor="#FFB74D" android:pathData="M5,13 h2 v2 h-2 z M4,15 h2 v3 h-2 z M6,19 h1 v1 h-1 z" />
+              <path android:fillColor="#F2762E" android:pathData="M25,12 h3 v2 h-3 z M26,14 h3 v4 h-3 z M25,18 h2 v2 h-2 z" />
+              <path android:fillColor="#FFB74D" android:pathData="M25,13 h2 v2 h-2 z M26,15 h2 v3 h-2 z" />
+              <path android:fillColor="#FFF3E0" android:pathData="M13,17 h6 v1 h-6 z M11,18 h10 v5 h-10 z M12,23 h8 v1 h-8 z M14,24 h4 v1 h-4 z" />
+              <path android:fillColor="#D6409F" android:pathData="M12,19 h1 v3 h-1 z M19,19 h1 v3 h-1 z M15,15 h2 v1 h-2 z M15,22 h2 v1 h-2 z M16,16 h1 v1 h-1 z" />
+              <path android:fillColor="#FFE0B2" android:pathData="M12,11 h8 v1 h-8 z M11,12 h10 v4 h-10 z M13,16 h6 v1 h-6 z" />
+              <path android:fillColor="#FFCCBC" android:pathData="M11,9 h10 v2 h-10 z M10,11 h2 v2 h-2 z M20,11 h2 v1 h-2 z M13,11 h2 v3 h-2 z M17,11 h3 v2 h-3 z" />
+              <path android:fillColor="#FFCCBC" android:pathData="M14,6 h2 v1 h-2 z M15,7 h2 v2 h-2 z" />
+              <path android:fillColor="#FFB347" android:pathData="M10,9 h2 v1 h-2 z M9,10 h4 v3 h-4 z M10,13 h2 v1 h-2 z" />
+              <path android:fillColor="#FFE082" android:pathData="M10,11 h2 v1 h-2 z" />
+              <path android:fillColor="#3A1A0A" android:pathData="M12,12 h2 v2 h-2 z M18,12 h2 v2 h-2 z" />
+              <path android:fillColor="#FFFFFF" android:pathData="M13,12 h1 v1 h-1 z M19,12 h1 v1 h-1 z" />
+              <path android:fillColor="#D6409F" android:pathData="M13,13 h1 v1 h-1 z M19,13 h1 v1 h-1 z" />
+              <path android:fillColor="#FF9999" android:pathData="M11,14 h2 v1 h-2 z M19,14 h2 v1 h-2 z" />
+              <path android:fillColor="#A02020" android:pathData="M15,15 h2 v1 h-2 z" />
+              <path android:fillColor="#FFF3E0" android:pathData="M8,16 h3 v2 h-3 z M21,16 h3 v2 h-3 z" />
+              <path android:fillColor="#FFE0B2" android:pathData="M10,18 h2 v1 h-2 z M20,18 h2 v1 h-2 z" />
+              <path android:fillColor="#FFB347" android:pathData="M21,14 h1 v4 h-1 z" />
+              <path android:fillColor="#FFEA00" android:pathData="M22,15 h2 v2 h-2 z M23,14 h1 v4 h-1 z" />
+              <path android:fillColor="#FFFFFF" android:pathData="M23,15 h1 v2 h-1 z" />
+              <path android:fillColor="#FFE0B2" android:pathData="M14,25 h2 v2 h-2 z M17,25 h2 v2 h-2 z" />
+              <path android:fillColor="#D6409F" android:pathData="M14,27 h2 v1 h-2 z M17,27 h2 v1 h-2 z" />
+              <path android:fillColor="#FFEA00" android:pathData="M7,9 h1 v1 h-1 z M25,8 h1 v1 h-1 z M8,22 h1 v1 h-1 z M24,23 h1 v1 h-1 z" />
+              <path android:fillColor="#FFFFFF" android:pathData="M22,10 h1 v1 h-1 z M7,18 h1 v1 h-1 z M25,18 h1 v1 h-1 z" />
+          </vector>
+          BH_EOF
+
+          mkdir -p "$(dirname app/src/main/res/drawable/fairy_forest.xml)"
+          cat > app/src/main/res/drawable/fairy_forest.xml <<'BH_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="96dp" android:height="96dp" android:viewportWidth="32" android:viewportHeight="32">
+              <path android:fillColor="#E8F5E9" android:pathData="M12,8 h8 v1 h-8 z M10,9 h12 v2 h-12 z M9,11 h14 v3 h-14 z M10,14 h4 v4 h-4 z M21,14 h1 v1 h-1 z" />
+              <path android:fillColor="#4CAF50" android:pathData="M4,12 h3 v2 h-3 z M3,14 h3 v4 h-3 z M5,18 h2 v2 h-2 z" />
+              <path android:fillColor="#A5D6A7" android:pathData="M5,13 h2 v2 h-2 z M4,15 h2 v3 h-2 z M6,19 h1 v1 h-1 z" />
+              <path android:fillColor="#4CAF50" android:pathData="M25,12 h3 v2 h-3 z M26,14 h3 v4 h-3 z M25,18 h2 v2 h-2 z" />
+              <path android:fillColor="#A5D6A7" android:pathData="M25,13 h2 v2 h-2 z M26,15 h2 v3 h-2 z" />
+              <path android:fillColor="#F1F8E9" android:pathData="M13,17 h6 v1 h-6 z M11,18 h10 v5 h-10 z M12,23 h8 v1 h-8 z M14,24 h4 v1 h-4 z" />
+              <path android:fillColor="#2E7D32" android:pathData="M12,19 h1 v3 h-1 z M19,19 h1 v3 h-1 z M15,15 h2 v1 h-2 z M15,22 h2 v1 h-2 z M16,16 h1 v1 h-1 z" />
+              <path android:fillColor="#FFE0B2" android:pathData="M12,11 h8 v1 h-8 z M11,12 h10 v4 h-10 z M13,16 h6 v1 h-6 z" />
+              <path android:fillColor="#E8F5E9" android:pathData="M11,9 h10 v2 h-10 z M10,11 h2 v2 h-2 z M20,11 h2 v1 h-2 z M13,11 h2 v3 h-2 z M17,11 h3 v2 h-3 z" />
+              <path android:fillColor="#E8F5E9" android:pathData="M14,6 h2 v1 h-2 z M15,7 h2 v2 h-2 z" />
+              <path android:fillColor="#8BC34A" android:pathData="M10,9 h2 v1 h-2 z M9,10 h4 v3 h-4 z M10,13 h2 v1 h-2 z" />
+              <path android:fillColor="#CDDC39" android:pathData="M10,11 h2 v1 h-2 z" />
+              <path android:fillColor="#0E2413" android:pathData="M12,12 h2 v2 h-2 z M18,12 h2 v2 h-2 z" />
+              <path android:fillColor="#FFFFFF" android:pathData="M13,12 h1 v1 h-1 z M19,12 h1 v1 h-1 z" />
+              <path android:fillColor="#8BC34A" android:pathData="M13,13 h1 v1 h-1 z M19,13 h1 v1 h-1 z" />
+              <path android:fillColor="#FF9999" android:pathData="M11,14 h2 v1 h-2 z M19,14 h2 v1 h-2 z" />
+              <path android:fillColor="#6B3410" android:pathData="M15,15 h2 v1 h-2 z" />
+              <path android:fillColor="#F1F8E9" android:pathData="M8,16 h3 v2 h-3 z M21,16 h3 v2 h-3 z" />
+              <path android:fillColor="#FFE0B2" android:pathData="M10,18 h2 v1 h-2 z M20,18 h2 v1 h-2 z" />
+              <path android:fillColor="#CDDC39" android:pathData="M21,14 h1 v4 h-1 z" />
+              <path android:fillColor="#F0F4C3" android:pathData="M22,15 h2 v2 h-2 z M23,14 h1 v4 h-1 z" />
+              <path android:fillColor="#FFFFFF" android:pathData="M23,15 h1 v2 h-1 z" />
+              <path android:fillColor="#FFE0B2" android:pathData="M14,25 h2 v2 h-2 z M17,25 h2 v2 h-2 z" />
+              <path android:fillColor="#2E7D32" android:pathData="M14,27 h2 v1 h-2 z M17,27 h2 v1 h-2 z" />
+              <path android:fillColor="#CDDC39" android:pathData="M7,9 h1 v1 h-1 z M25,8 h1 v1 h-1 z M8,22 h1 v1 h-1 z M24,23 h1 v1 h-1 z" />
+              <path android:fillColor="#FFFFFF" android:pathData="M22,10 h1 v1 h-1 z M7,18 h1 v1 h-1 z M25,18 h1 v1 h-1 z" />
+          </vector>
+          BH_EOF
+
+          mkdir -p "$(dirname app/src/main/res/drawable/fairy_violet.xml)"
+          cat > app/src/main/res/drawable/fairy_violet.xml <<'BH_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="96dp" android:height="96dp" android:viewportWidth="32" android:viewportHeight="32">
+              <path android:fillColor="#F0E4FF" android:pathData="M12,8 h8 v1 h-8 z M10,9 h12 v2 h-12 z M9,11 h14 v3 h-14 z M10,14 h4 v4 h-4 z M21,14 h1 v1 h-1 z" />
+              <path android:fillColor="#8E6CF0" android:pathData="M4,12 h3 v2 h-3 z M3,14 h3 v4 h-3 z M5,18 h2 v2 h-2 z" />
+              <path android:fillColor="#D1B3FF" android:pathData="M5,13 h2 v2 h-2 z M4,15 h2 v3 h-2 z M6,19 h1 v1 h-1 z" />
+              <path android:fillColor="#8E6CF0" android:pathData="M25,12 h3 v2 h-3 z M26,14 h3 v4 h-3 z M25,18 h2 v2 h-2 z" />
+              <path android:fillColor="#D1B3FF" android:pathData="M25,13 h2 v2 h-2 z M26,15 h2 v3 h-2 z" />
+              <path android:fillColor="#FFFFFF" android:pathData="M13,17 h6 v1 h-6 z M11,18 h10 v5 h-10 z M12,23 h8 v1 h-8 z M14,24 h4 v1 h-4 z" />
+              <path android:fillColor="#5C6BF0" android:pathData="M12,19 h1 v3 h-1 z M19,19 h1 v3 h-1 z M15,15 h2 v1 h-2 z M15,22 h2 v1 h-2 z M16,16 h1 v1 h-1 z" />
+              <path android:fillColor="#F5C9B0" android:pathData="M12,11 h8 v1 h-8 z M11,12 h10 v4 h-10 z M13,16 h6 v1 h-6 z" />
+              <path android:fillColor="#F0E4FF" android:pathData="M11,9 h10 v2 h-10 z M10,11 h2 v2 h-2 z M20,11 h2 v1 h-2 z M13,11 h2 v3 h-2 z M17,11 h3 v2 h-3 z" />
+              <path android:fillColor="#F0E4FF" android:pathData="M14,6 h2 v1 h-2 z M15,7 h2 v2 h-2 z" />
+              <path android:fillColor="#E04FD0" android:pathData="M10,9 h2 v1 h-2 z M9,10 h4 v3 h-4 z M10,13 h2 v1 h-2 z" />
+              <path android:fillColor="#FFD700" android:pathData="M10,11 h2 v1 h-2 z" />
+              <path android:fillColor="#140828" android:pathData="M12,12 h2 v2 h-2 z M18,12 h2 v2 h-2 z" />
+              <path android:fillColor="#FFFFFF" android:pathData="M13,12 h1 v1 h-1 z M19,12 h1 v1 h-1 z" />
+              <path android:fillColor="#E04FD0" android:pathData="M13,13 h1 v1 h-1 z M19,13 h1 v1 h-1 z" />
+              <path android:fillColor="#FF9999" android:pathData="M11,14 h2 v1 h-2 z M19,14 h2 v1 h-2 z" />
+              <path android:fillColor="#5B2A7A" android:pathData="M15,15 h2 v1 h-2 z" />
+              <path android:fillColor="#FFFFFF" android:pathData="M8,16 h3 v2 h-3 z M21,16 h3 v2 h-3 z" />
+              <path android:fillColor="#F5C9B0" android:pathData="M10,18 h2 v1 h-2 z M20,18 h2 v1 h-2 z" />
+              <path android:fillColor="#8E6CF0" android:pathData="M21,14 h1 v4 h-1 z" />
+              <path android:fillColor="#E1D4FF" android:pathData="M22,15 h2 v2 h-2 z M23,14 h1 v4 h-1 z" />
+              <path android:fillColor="#FFFFFF" android:pathData="M23,15 h1 v2 h-1 z" />
+              <path android:fillColor="#F5C9B0" android:pathData="M14,25 h2 v2 h-2 z M17,25 h2 v2 h-2 z" />
+              <path android:fillColor="#5C6BF0" android:pathData="M14,27 h2 v1 h-2 z M17,27 h2 v1 h-2 z" />
+              <path android:fillColor="#E04FD0" android:pathData="M7,9 h1 v1 h-1 z M25,8 h1 v1 h-1 z M8,22 h1 v1 h-1 z M24,23 h1 v1 h-1 z" />
+              <path android:fillColor="#FFFFFF" android:pathData="M22,10 h1 v1 h-1 z M7,18 h1 v1 h-1 z M25,18 h1 v1 h-1 z" />
+          </vector>
+          BH_EOF
+
+          mkdir -p "$(dirname app/src/main/res/drawable/fairy_midnight.xml)"
+          cat > app/src/main/res/drawable/fairy_midnight.xml <<'BH_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <vector xmlns:android="http://schemas.android.com/apk/res/android" android:width="96dp" android:height="96dp" android:viewportWidth="32" android:viewportHeight="32">
+              <path android:fillColor="#B0E0E6" android:pathData="M12,8 h8 v1 h-8 z M10,9 h12 v2 h-12 z M9,11 h14 v3 h-14 z M10,14 h4 v4 h-4 z M21,14 h1 v1 h-1 z" />
+              <path android:fillColor="#22B8D4" android:pathData="M4,12 h3 v2 h-3 z M3,14 h3 v4 h-3 z M5,18 h2 v2 h-2 z" />
+              <path android:fillColor="#80DEEA" android:pathData="M5,13 h2 v2 h-2 z M4,15 h2 v3 h-2 z M6,19 h1 v1 h-1 z" />
+              <path android:fillColor="#22B8D4" android:pathData="M25,12 h3 v2 h-3 z M26,14 h3 v4 h-3 z M25,18 h2 v2 h-2 z" />
+              <path android:fillColor="#80DEEA" android:pathData="M25,13 h2 v2 h-2 z M26,15 h2 v3 h-2 z" />
+              <path android:fillColor="#E0E8F0" android:pathData="M13,17 h6 v1 h-6 z M11,18 h10 v5 h-10 z M12,23 h8 v1 h-8 z M14,24 h4 v1 h-4 z" />
+              <path android:fillColor="#0EA5C6" android:pathData="M12,19 h1 v3 h-1 z M19,19 h1 v3 h-1 z M15,15 h2 v1 h-2 z M15,22 h2 v1 h-2 z M16,16 h1 v1 h-1 z" />
+              <path android:fillColor="#FFD9B3" android:pathData="M12,11 h8 v1 h-8 z M11,12 h10 v4 h-10 z M13,16 h6 v1 h-6 z" />
+              <path android:fillColor="#B0E0E6" android:pathData="M11,9 h10 v2 h-10 z M10,11 h2 v2 h-2 z M20,11 h2 v1 h-2 z M13,11 h2 v3 h-2 z M17,11 h3 v2 h-3 z" />
+              <path android:fillColor="#B0E0E6" android:pathData="M14,6 h2 v1 h-2 z M15,7 h2 v2 h-2 z" />
+              <path android:fillColor="#6EA8FE" android:pathData="M10,9 h2 v1 h-2 z M9,10 h4 v3 h-4 z M10,13 h2 v1 h-2 z" />
+              <path android:fillColor="#C5DBFF" android:pathData="M10,11 h2 v1 h-2 z" />
+              <path android:fillColor="#000000" android:pathData="M12,12 h2 v2 h-2 z M18,12 h2 v2 h-2 z" />
+              <path android:fillColor="#FFFFFF" android:pathData="M13,12 h1 v1 h-1 z M19,12 h1 v1 h-1 z" />
+              <path android:fillColor="#22B8D4" android:pathData="M13,13 h1 v1 h-1 z M19,13 h1 v1 h-1 z" />
+              <path android:fillColor="#FF9999" android:pathData="M11,14 h2 v1 h-2 z M19,14 h2 v1 h-2 z" />
+              <path android:fillColor="#4A1E1E" android:pathData="M15,15 h2 v1 h-2 z" />
+              <path android:fillColor="#E0E8F0" android:pathData="M8,16 h3 v2 h-3 z M21,16 h3 v2 h-3 z" />
+              <path android:fillColor="#FFD9B3" android:pathData="M10,18 h2 v1 h-2 z M20,18 h2 v1 h-2 z" />
+              <path android:fillColor="#6EA8FE" android:pathData="M21,14 h1 v4 h-1 z" />
+              <path android:fillColor="#C5DBFF" android:pathData="M22,15 h2 v2 h-2 z M23,14 h1 v4 h-1 z" />
+              <path android:fillColor="#FFFFFF" android:pathData="M23,15 h1 v2 h-1 z" />
+              <path android:fillColor="#FFD9B3" android:pathData="M14,25 h2 v2 h-2 z M17,25 h2 v2 h-2 z" />
+              <path android:fillColor="#0EA5C6" android:pathData="M14,27 h2 v1 h-2 z M17,27 h2 v1 h-2 z" />
+              <path android:fillColor="#22B8D4" android:pathData="M7,9 h1 v1 h-1 z M25,8 h1 v1 h-1 z M8,22 h1 v1 h-1 z M24,23 h1 v1 h-1 z" />
+              <path android:fillColor="#FFFFFF" android:pathData="M22,10 h1 v1 h-1 z M7,18 h1 v1 h-1 z M25,18 h1 v1 h-1 z" />
+          </vector>
+          BH_EOF
+
       - name: Prepare the signing key
         run: |
           mkdir -p app
@@ -2484,8 +2697,7 @@ jobs:
         run: yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
       - name: Build debug APK
         run: |
-          set -o pipefail
-          gradle assembleDebug --no-daemon 2>&1 | tee build.log
+          set -o pipefail          gradle assembleDebug --no-daemon 2>&1 | tee build.log
       - name: Show build errors (only if the build failed)
         if: failure()
         run: |
@@ -2497,18 +2709,18 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Rename APK and show its signing key
         run: |
-          cp app/build/outputs/apk/debug/app-debug.apk OL-Helper.apk
+          cp app/build/outputs/apk/debug/app-debug.apk A-Helper.apk
           AS=$(ls "$ANDROID_HOME"/build-tools/*/apksigner 2>/dev/null | tail -1)
           {
-            echo "## OL Helper build ${{ github.run_number }}"
+            echo "## A Helper build ${{ github.run_number }}"
             echo "Signing key (should be the same on every build, so the app updates in place):"
             echo '```'
-            if [ -n "$AS" ]; then "$AS" verify --print-certs OL-Helper.apk 2>&1 | grep -i "SHA-256" | head -1; else echo "apksigner not found"; fi
+            if [ -n "$AS" ]; then "$AS" verify --print-certs A-Helper.apk 2>&1 | grep -i "SHA-256" | head -1; else echo "apksigner not found"; fi
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Publish APK to Releases
         uses: softprops/action-gh-release@v2
         with:
           tag_name: build-${{ github.run_number }}
-          name: OL Helper build ${{ github.run_number }}
-          files: OL-Helper.apk
+          name: A Helper build ${{ github.run_number }}
+          files: A-Helper.apk
