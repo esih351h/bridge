@@ -9,7 +9,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Version
-        run: echo "build.yml version - Stop and Change buttons, Perfect/Record/New/Game Over tag, Game Over steering"
+        run: echo "build.yml version 2.3 - typical-hold book (no hard Game Over limits), odd rounds ignored, Tidy button, Pause/Change notification"
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -46,8 +46,8 @@ jobs:
                   applicationId = "com.example.bridgehelper"
                   minSdk = 26
                   targetSdk = 34
-                  versionCode = 4
-                  versionName = "2.2"
+                  versionCode = 5
+                  versionName = "2.3"
               }
               // The same key for every build: Android then lets a new build update the installed app and keep its data.
               signingConfigs {
@@ -343,7 +343,7 @@ jobs:
                           timed, "auto")
                       timedSw = sw; content.addView(c)
                       val (c2, sw2) = switchField("Perfect memory",
-                          "Remembers every round (Perfect, landed, Game Over) and reuses what it learned for similar bridges. A tag beside the anchor shows what usually happened on bridges like this one: Perfect, Record (landed, no bonus), Game Over, or New when nothing is stored. A Game Over hold is never repeated.",
+                          "Remembers every round (Perfect, landed, Game Over) and reuses what it learned for similar bridges. A tag beside the anchor shows what usually happened on bridges like this one: Perfect, Record (landed, no bonus), Game Over, or New when nothing is stored. Game Overs count for less than Perfects, since one late press can cause one.",
                           perf, "auto")
                       perfSw = sw2; content.addView(c2)
                       val (c3, sw3) = switchField("Hold and watch",
@@ -644,6 +644,7 @@ jobs:
               private var tone: ToneGenerator? = null
               // optional auto mode (presses/releases through TapService)
               private var autoEnabled = false
+              @Volatile private var paused = false          // the Pause button: nothing is pressed or tapped while this is on
               @Volatile private var autoActive = false
               // auto flow: 0 = ready to hold, 1 = holding, 2 = released, waiting for the next platform
               private var autoState = 0
@@ -677,6 +678,7 @@ jobs:
               private var usedSug: PerfBook.Suggest? = null; private var usedHow = ""
               private var perfectWatch = false; private var perfectSeen = false
               private var bookSize = 0
+              private var rejectRun = 0                    // odd rounds in a row that the timing model ignored
               private var bookCache: List<PerfBook.Entry> = emptyList(); private var bookAt = 0L
               private var bookTag = 0                       // overlay tag for the bridge in front of us: 0 none, 1 New, 2 Perfect, 3 Record, 4 Game Over
               private var bookCounts = intArrayOf(0, 0, 0)  // rounds stored near this distance: Perfect, landed, Game Over
@@ -716,7 +718,16 @@ jobs:
                   else i.getParcelableExtra("data")
 
               override fun onStartCommand(i: Intent?, f: Int, id: Int): Int {
-                  if (i?.action == "STOP") {                       // the Stop button in the notification
+                  if (i?.action == "PAUSE") {                      // the Pause / Resume button in the notification
+                      if (!::nb.isInitialized) { stopSelf(); return START_NOT_STICKY }
+                      paused = !paused
+                      if (paused) { bg.removeCallbacks(hwRelease); autoRelease() }
+                      else { autoState = 0; readyAtMs = SystemClock.elapsedRealtime() + 1500L; retries = 0 }
+                      nb.setActions(*notifActions())
+                      status(if (paused) "PAUSED: nothing is pressed or tapped until you tap Resume" else "Resumed", true)
+                      return START_NOT_STICKY
+                  }
+                  if (i?.action == "STOP") {                       // kept for older notifications
                       getSharedPreferences("p", MODE_PRIVATE).edit().putBoolean("running", false).apply()
                       stopSelf(); return START_NOT_STICKY
                   }
@@ -726,16 +737,10 @@ jobs:
                       .createNotificationChannel(NotificationChannel(ch, "Overlay", NotificationManager.IMPORTANCE_LOW))
                   val piFlags = PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
                   val front = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
-                  val stopPi = PendingIntent.getService(this, 1, Intent(this, OverlayService::class.java).setAction("STOP"), piFlags)
-                  // Change: stop OL Helper and go back to the app to pick another mode
-                  val changePi = PendingIntent.getActivity(this, 2, Intent(this, MainActivity::class.java).putExtra("change", true).addFlags(front), piFlags)
                   val openPi = PendingIntent.getActivity(this, 3, Intent(this, MainActivity::class.java).addFlags(front), piFlags)
                   nb = Notification.Builder(this, ch).setContentTitle("OL Helper running")
                       .setContentText("starting…").setSmallIcon(android.R.drawable.ic_menu_compass).setContentIntent(openPi)
-                      .addAction(Notification.Action.Builder(
-                          Icon.createWithResource(this, android.R.drawable.ic_menu_close_clear_cancel), "Stop", stopPi).build())
-                      .addAction(Notification.Action.Builder(
-                          Icon.createWithResource(this, android.R.drawable.ic_menu_revert), "Change", changePi).build())
+                  nb.setActions(*notifActions())
                   if (Build.VERSION.SDK_INT >= 29)
                       startForeground(1, nb.build(), ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
                   else startForeground(1, nb.build())
@@ -793,6 +798,20 @@ jobs:
                       stopSelf()
                   }
                   return START_NOT_STICKY
+              }
+
+              /** Pause (or Resume) and Change. Change stops OL Helper and goes back to the app to pick another mode. */
+              private fun notifActions(): Array<Notification.Action> {
+                  val piFlags = PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+                  val front = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
+                  val pausePi = PendingIntent.getService(this, 1, Intent(this, OverlayService::class.java).setAction("PAUSE"), piFlags)
+                  val changePi = PendingIntent.getActivity(this, 2, Intent(this, MainActivity::class.java).putExtra("change", true).addFlags(front), piFlags)
+                  val pauseAct = Notification.Action.Builder(
+                      Icon.createWithResource(this, if (paused) android.R.drawable.ic_media_play else android.R.drawable.ic_media_pause),
+                      if (paused) "Resume" else "Pause", pausePi).build()
+                  val changeAct = Notification.Action.Builder(
+                      Icon.createWithResource(this, android.R.drawable.ic_menu_revert), "Change", changePi).build()
+                  return arrayOf(pauseAct, changeAct)
               }
 
               /** Shows the latest state in the notification and in the app, so it can be read without any overlay. */
@@ -907,7 +926,7 @@ jobs:
                   if (cls != tClass) { tClass = cls; tSince = now }
                   scheduleTower(320)
                   publish(GuideState(false, debug = "tower %s fights=%d auto=%s blobs=%d skip %.2f pause %.2f".format(
-                      towerNames[cls], fights, if (autoEnabled) "on" else "off", blobs.size, skip, pause)))
+                      towerNames[cls], fights, if (paused) "PAUSED" else if (autoEnabled) "on" else "off", blobs.size, skip, pause)))
               }
 
               private fun scheduleTower(ms: Long) {
@@ -923,7 +942,7 @@ jobs:
                   if (now - tSince < 300) { scheduleTower(320 - (now - tSince)); return }   // wait until the screen is steady
                   if (now < pauseUntilMs) { scheduleTower(500); return }
                   if (now < nextTapMs) { scheduleTower(nextTapMs - now + 20); return }
-                  if (!autoEnabled) { scheduleTower(1000); return }
+                  if (!autoEnabled || paused) { scheduleTower(1000); return }
                   tapTower(cls, now)
                   scheduleTower(1200)   // if the same screen is still there afterwards, the next check may tap again (limited)
               }
@@ -1127,8 +1146,8 @@ jobs:
                   } else if (!autoEnabled || !perfMemOn) bookTag = 0
                   fun idleState(len: Float) = GuideState(true, m[3], m[2], m[0] + 0.2f * m[1], m[0] + 0.8f * m[1], aimNow, 0f, 0, W,
                       "bridge gap=%.0f w=%.0f dot=%s tip=%.0f auto=%s%s".format(m[0], m[1], if (m[4] > 0f) "yes" else "no", len,
-                          if (autoEnabled) "on" else "off",
-                          (if (autoEnabled) " (" + autoNote() + ")" else "") + (if (perfMemOn && autoEnabled) " book=" + bookSize + " [P" + bookCounts[0] + " R" + bookCounts[1] + " G" + bookCounts[2] + "]" else "")), bookTag)
+                          if (paused) "PAUSED" else if (autoEnabled) "on" else "off",
+                          (if (autoEnabled && !paused) " (" + autoNote() + ")" else "") + (if (perfMemOn && autoEnabled) " book=" + bookSize + " [P" + bookCounts[0] + " R" + bookCounts[1] + " G" + bookCounts[2] + "]" else "")), bookTag)
 
                   // 4) is a pole starting to grow? (needs the tip to rise over several frames in a row)
                   // right end of a fallen pole lying across the gap (rows around the platform top); -1 if none
@@ -1185,7 +1204,7 @@ jobs:
                   } else { arm = 0; armPrev = 0f }
                   if (arm == 0) ref = buildRef(mTop, mBase)   // absorb static clutter, but not a pole that is rising
                   resetHold()
-                  if (autoEnabled) autoTick(m[0], m[1], m[2], aimNow, W)
+                  if (autoEnabled && !paused) autoTick(m[0], m[1], m[2], aimNow, W)
                   pubIdle(len)
               }
 
@@ -1268,6 +1287,13 @@ jobs:
                   if (tip < 0 || !pressTimed || pressDur <= 0L) return
                   val lObs = tip - pressBase - W * 0.004f      // same reference point as the aim
                   if (lObs < 15f || abs(lObs - pressAim) > 80f) return   // no bridge seen, or a wild reading
+                  // far from what the timing model expects: most likely a press that registered late, not a wrong model
+                  val offModel = lObs - rateEst * (pressDur - timedAdjMs) / 1000f
+                  if (abs(offModel) > 25f) {
+                      rejectRun++
+                      if (rejectRun < 4) { status("odd round ignored for learning (" + abs(offModel.toInt()) + " px off the timing model)", true); return }
+                  }
+                  rejectRun = 0
                   durSamples.add(pressDur.toFloat()); lenSamples.add(lObs)
                   if (durSamples.size > 12) { durSamples.removeAt(0); lenSamples.removeAt(0) }
                   var fitted = false
@@ -1301,8 +1327,10 @@ jobs:
                   val haveL = lObs >= 15f && abs(lObs - pressAim) <= 80f
                   val err = if (haveL) lObs - pressAim else 0f
                   val outcome = if (perfectSeen) 0 else if (gameOverSeen) 2 else 1
+                  // a "Perfect" whose hold is far from what the timing model says is probably a misread: do not let it into the book
+                  val odd = outcome == 0 && pressTimed && abs(pressDur - (pressAim / rateEst * 1000f + timedAdjMs)) > 60f
                   var saved = false
-                  if (perfMemOn && (haveL || outcome == 0)) {
+                  if (perfMemOn && !odd && (haveL || outcome == 0)) {
                       bookSize = PerfBook.record(this, pressAim, pressGap, pressPw, if (pressTimed) pressDur.toFloat() else -1f, err, outcome)
                       saved = true
                   }
@@ -1316,7 +1344,7 @@ jobs:
                   val src = if (sug != null) "book used: " + usedHow else "no book entry"
                   val how = if (pressTimed) "hold " + pressDur + " ms"
                             else "watch, let go " + (if (hwDir > 0) "going up" else if (hwDir < 0) "coming down" else "(no release seen)")
-                  val line = res + " | " + src + " | " + how + " | distance " + pressAim.toInt() + " px" + (if (saved) " | saved" else "")
+                  val line = res + " | " + src + " | " + how + " | distance " + pressAim.toInt() + " px" + (if (odd) " | NOT saved: hold far from the timing model" else if (saved) " | saved" else "")
                   EventLog.add(this, line)
                   status(line, true)
               }
@@ -1475,7 +1503,7 @@ jobs:
                   if (pressTimed) {
                       var dur = max(60L, (ms + timedAdjMs).toLong())
                       if (perfMemOn) {
-                          val sg = PerfBook.suggestDur(bookNow(), aim, pmTol, rateEst)
+                          val sg = PerfBook.suggestDur(bookNow(), aim, pmTol, rateEst, ms + timedAdjMs)
                           if (sg != null) { dur = max(60L, sg.value.toLong()); usedSug = sg; usedHow = sg.how }
                       }
                       pressDur = dur
@@ -1678,28 +1706,43 @@ jobs:
                   return near.size.toString() + " round(s) near this distance: " + p + " Perfect, " + g + " Game Over"
               }
 
-              /** The hold time (ms) for this distance, from fixed-length rounds nearby; null when nothing is close enough. */
-              fun suggestDur(list: List<Entry>, aim: Float, tol: Float, rate: Float): Suggest? {
+              /** The middle value of (value, weight) pairs: one odd round cannot drag it far, unlike an average. */
+              private fun wmedian(v: List<Pair<Float, Float>>): Float {
+                  val s = v.sortedBy { it.first }
+                  val tot = s.sumOf { it.second.toDouble() }
+                  var acc = 0.0
+                  for (p in s) { acc += p.second; if (acc >= tot / 2) return p.first }
+                  return s.last().first
+              }
+
+              /**
+               * The hold time (ms) for this distance: the typical hold of the rounds stored nearby, together with the timing model
+               * (model = aim / speed + adjust, in ms). A Perfect round counts for 3, a landed one for 1 and a Game Over for half,
+               * because one late press can cause a Game Over. Null when nothing is stored nearby.
+               */
+              fun suggestDur(list: List<Entry>, aim: Float, tol: Float, rate: Float, model: Float): Suggest? {
                   val near = list.filter { it.dur > 0f && abs(it.aim - aim) <= tol }
                   if (near.isEmpty()) return null
-                  var sw = 0f; var sd = 0f
-                  var lo = -1e9f; var hi = 1e9f          // holds that are known to end in a Game Over at this distance
+                  val vals = ArrayList<Pair<Float, Float>>()
+                  vals.add(Pair(model, 3f))                 // the model counts like three rounds, so a few odd rounds cannot move a distance far
                   for (e in near) {
-                      val here = e.dur + (aim - e.aim) / rate * 1000f        // that same hold, moved to this distance
-                      val ideal = here - e.err / rate * 1000f                // the hold that would have hit the dot exactly
-                      val wt = (if (e.outcome == 0) 3f else 1f) / (1f + abs(e.aim - aim))
-                      sw += wt; sd += wt * ideal
-                      if (e.outcome == 2) {                                   // Game Over: that hold, and anything beyond it, fails
-                          if (e.err < 0f) lo = maxOf(lo, here + 10f) else hi = minOf(hi, here - 10f)
-                      }
+                      val here = e.dur + (aim - e.aim) / rate * 1000f             // that hold, moved to this distance
+                      val v = if (e.outcome == 0) here else here - e.err / rate * 1000f   // Perfect: it worked. Others: the hold that would have
+                      val wt = e.count * (if (e.outcome == 0) 3f else if (e.outcome == 1) 1f else 0.5f) / (1f + abs(e.aim - aim))
+                      vals.add(Pair(v, wt))
                   }
-                  var dur = sd / sw
-                  var how = describe(near)
-                  if (lo > hi) { dur = (lo + hi) / 2f; how += " - squeezed between two Game Overs" }
-                  else if (dur < lo) { dur = lo; how += " - kept clear of a short Game Over" }
-                  else if (dur > hi) { dur = hi; how += " - kept clear of a long Game Over" }
                   val nearest = near.minByOrNull { abs(it.aim - aim) } ?: return null
-                  return Suggest(dur, nearest.aim, nearest.gap, nearest.w, near.size, how)
+                  return Suggest(wmedian(vals), nearest.aim, nearest.gap, nearest.w, near.size, describe(near) + ", typical hold")
+              }
+
+              /** Remove Perfect entries whose hold is far from what the timing model says for that distance (a false Perfect). Returns how many. */
+              fun tidy(c: Context, rate: Float, adj: Float): Int {
+                  val list = load(c)
+                  val bad = list.filter { it.outcome == 0 && it.dur > 0f && abs(it.dur - (it.aim / rate * 1000f + adj)) > 60f }
+                  if (bad.isEmpty()) return 0
+                  list.removeAll(bad)
+                  save(c, list)
+                  return bad.size
               }
 
               /** Rounds near this distance by result: [Perfect, landed, Game Over]. */
@@ -1834,6 +1877,7 @@ jobs:
           import android.view.Gravity
           import android.view.ViewGroup.LayoutParams.MATCH_PARENT
           import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
+          import android.widget.Toast
           import android.widget.LinearLayout
           import android.widget.TextView
           import kotlin.math.abs
@@ -1850,7 +1894,7 @@ jobs:
                   val col = buildScreen("Perfect book", true)
                   all = PerfBook.load(this).sortedBy { it.aim }
 
-                  col.addView(label("Every auto round is saved with how it ended: Perfect, landed (Record), or Game Over. Before a hold, the app reuses what it learned nearby and keeps clear of holds that ended in a Game Over. The tag beside the anchor shows the most common result for the bridge in front of you.", 13f, Ui.muted)
+                  col.addView(label("Every auto round is saved with how it ended: Perfect, landed (Record), or Game Over. Before a hold, the app takes the typical hold (the median) of the rounds stored nearby, together with its timing model, so one odd round cannot drag a distance off. Game Overs count for less than Perfects, because one late press can cause one. The tag beside the anchor shows the most common result for the bridge in front of you.", 13f, Ui.muted)
                       .apply { setPadding(0, 0, 0, dp(14)) })
 
                   // does the book help?
@@ -1867,6 +1911,12 @@ jobs:
 
                   col.addView(bigButton("Activity log", Ui.blue, 16f, 56) { startActivity(Intent(this, EventLogActivity::class.java)) })
                   col.addView(bigButton("Backup and restore", Ui.teal, 16f, 56) { startActivity(Intent(this, BackupActivity::class.java)) })
+                  col.addView(bigButton("Tidy up odd entries", Ui.orange, 16f, 56) {
+                      val pr = Prefs.of(this)
+                      val n = PerfBook.tidy(this, pr.getFloat("rateEst", 295f), pr.getFloat("timedAdj", 0f))
+                      Toast.makeText(this, if (n == 0) "Nothing odd found" else "Removed " + n + " Perfect entries that did not fit the timing", Toast.LENGTH_LONG).show()
+                      if (n > 0) recreate()
+                  })
 
                   // filter: All / Perfect / Landed / Game Over
                   val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
@@ -2085,7 +2135,7 @@ jobs:
 
                   val notifOk = Build.VERSION.SDK_INT < 33 ||
                       checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
-                  row("Notifications", "Shows the live status and the Stop and Change buttons while OL Helper runs.",
+                  row("Notifications", "Shows the live status and the Pause and Change buttons while OL Helper runs.",
                       notifOk, false, "Allow notifications") {
                       if (Build.VERSION.SDK_INT >= 33) requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 2)
                   }
