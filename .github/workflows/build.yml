@@ -9,7 +9,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Version
-        run: echo "build.yml version 2.4 - timing drift fix, hold from your own Perfect rounds, round numbers in the log, safe-zone test"
+        run: echo "build.yml version 3.0 - fully automatic bridge, distance-to-dot book, Perfect hold is the target, book recorded always, convert old book, no safe-zone test"
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -46,8 +46,8 @@ jobs:
                   applicationId = "com.example.bridgehelper"
                   minSdk = 26
                   targetSdk = 34
-                  versionCode = 6
-                  versionName = "2.4"
+                  versionCode = 7
+                  versionName = "3.0"
               }
               // The same key for every build: Android then lets a new build update the installed app and keep its data.
               signingConfigs {
@@ -92,7 +92,6 @@ jobs:
                   <activity android:name=".TowerSettingsActivity" android:exported="false" />
                   <activity android:name=".RequirementsActivity" android:exported="false" />
                   <activity android:name=".ThemesActivity" android:exported="false" />
-                  <activity android:name=".ZoneTestActivity" android:exported="false" />
                   <activity android:name=".PerfectBookActivity" android:exported="false" />
                   <activity android:name=".EventLogActivity" android:exported="false" />
                   <activity android:name=".BackupActivity" android:exported="false" />
@@ -248,154 +247,83 @@ jobs:
 
           import android.app.Activity
           import android.content.Intent
-          import android.graphics.Color
-          import android.graphics.Typeface
           import android.os.Bundle
-          import android.view.Gravity
-          import android.view.ViewGroup.LayoutParams.MATCH_PARENT
-          import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
           import android.widget.EditText
           import android.widget.LinearLayout
           import android.widget.Switch
-          import android.widget.TextView
           import android.widget.Toast
 
           class BridgeSettingsActivity : Activity() {
-              private val values = LinkedHashMap<String, String>()      // every setting, whatever tab is showing
-              private val live = LinkedHashMap<String, EditText>()      // the fields of the tab on screen
-              private val tabViews = LinkedHashMap<String, TextView>()
-              private lateinit var autoSw: Switch
-              private lateinit var content: LinearLayout
-              private var timedSw: Switch? = null
-              private var timed = true
-              private var perfSw: Switch? = null
-              private var perf = true
-              private var watchSw: Switch? = null
-              private var watch = false
-              private var zoneSw: Switch? = null
-              private var zone = false
-              private var current = "general"
+              private val fields = LinkedHashMap<String, EditText>()
+              private lateinit var timedSw: Switch
+              private lateinit var watchSw: Switch
+              private lateinit var perfSw: Switch
+
+              private fun addFields(col: LinearLayout, keys: List<String>) {
+                  val p = Prefs.of(this)
+                  for (k in keys) {
+                      val o = Prefs.BRIDGE.first { it.key == k }
+                      val (c, et) = numberField(o, p.getFloat(o.key, o.def), false)
+                      fields[o.key] = et
+                      col.addView(c)
+                  }
+              }
 
               override fun onCreate(b: Bundle?) {
                   super.onCreate(b)
                   val p = Prefs.of(this)
-                  for (o in Prefs.BRIDGE) values[o.key] = Prefs.fmt(p.getFloat(o.key, o.def))
-                  timed = p.getBoolean("timedAlways", true)
-                  perf = p.getBoolean("perfMem", true)
-                  watch = p.getBoolean("holdWatch", false)
-                  zone = p.getBoolean("zoneTest", false)
-
                   val col = buildScreen("Bridge Mode", true)
-                  col.addView(label("General settings apply to both ways of playing. Manual and Auto each have their own.", 13f, Ui.muted)
+                  col.addView(label("Fully automatic. The pole has to reach the blue dot on the next platform: the distance from the pole's base, the edge of your platform, to that dot. The platform's width only decides whether a bridge reaches the platform or goes over it.", 13f, Ui.muted)
                       .apply { setPadding(0, 0, 0, dp(14)) })
 
-                  val (c1, s1) = switchField("Auto hold and release",
-                      "On: the app holds and lets go for you (needs the accessibility service). Off: you hold, the app only guides you.",
-                      p.getBoolean("auto_bridge", true))
-                  autoSw = s1; col.addView(c1)
-                  autoSw.setOnCheckedChangeListener { _, _ -> updateTabLooks() }
+                  col.addView(sectionTitle("HOLD METHOD"))
+                  val (c1, s1) = switchField("Hold and watch",
+                      "Keeps the finger down and watches the pole, which goes up and down while held. Far targets: lets go on the way up at the right height. Close targets: lets the pole pass and lets go on the way down. Replaces the fixed-length hold while it is on; if the hold does not register it falls back to fixed-length.",
+                      p.getBoolean("holdWatch", false))
+                  watchSw = s1; col.addView(c1)
+                  val (c2, s2) = switchField("Fixed-length hold",
+                      "Presses for a calculated time and lets the system lift the finger. Most accurate when Hold and watch is off.",
+                      p.getBoolean("timedAlways", true))
+                  timedSw = s2; col.addView(c2)
+                  addFields(col, listOf("hwNear"))
 
-                  col.addView(tab("General", "general"), LinearLayout.LayoutParams(MATCH_PARENT, dp(48)).apply { bottomMargin = dp(8) })
-                  val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-                  row.addView(tab("Manual", "manual"), LinearLayout.LayoutParams(0, dp(48), 1f).apply { rightMargin = dp(4) })
-                  row.addView(tab("Auto", "auto"), LinearLayout.LayoutParams(0, dp(48), 1f).apply { leftMargin = dp(4) })
-                  col.addView(row, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { bottomMargin = dp(14) })
+                  col.addView(sectionTitle("TIMING"))
+                  addFields(col, listOf("holdWait", "lead", "timedAdj", "rateEst", "aim"))
 
-                  content = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-                  col.addView(content)
-                  col.addView(bigButton("Reset this tab to default", Ui.orange, 16f, 56) { resetTab() })
+                  col.addView(sectionTitle("PRESS POSITION"))
+                  addFields(col, listOf("pressX", "pressY"))
+
+                  col.addView(sectionTitle("BOOK"))
+                  val (c3, s3) = switchField("Use the book for holds",
+                      "On: before each hold the app uses what the book learned for this distance. Off: it uses the timing model only. Every round is recorded either way. A tag beside the anchor shows what usually happened at this distance: Perfect, Record (landed, no bonus), Game Over, or New.",
+                      p.getBoolean("perfMem", true))
+                  perfSw = s3; col.addView(c3)
+                  addFields(col, listOf("pmTol"))
+                  col.addView(bigButton("Perfect book (" + PerfBook.load(this).size + ")", Ui.purple, 16f, 56) {
+                      startActivity(Intent(this, PerfectBookActivity::class.java))
+                  })
+
+                  col.addView(bigButton("Reset to default", Ui.orange, 16f, 56) { reset() })
                   col.addView(bigButton("Save", Ui.green, 16f, 56) { save(); Toast.makeText(this, "Saved", Toast.LENGTH_SHORT).show() })
-                  showTab("general", false)
-              }
-
-              private fun tab(text: String, key: String): TextView {
-                  val t = TextView(this).apply {
-                      this.text = text; textSize = 16f; setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD
-                      gravity = Gravity.CENTER; isClickable = true
-                      setOnClickListener { showTab(key, true) }
-                  }
-                  tabViews[key] = t
-                  return t
-              }
-
-              private fun updateTabLooks() {
-                  for ((key, v) in tabViews) {
-                      v.background = rounded(if (key == current) Ui.blue else Ui.card, 14)
-                      // the tab that does not match the Auto switch is dimmed, but still opens
-                      v.alpha = when (key) {
-                          "manual" -> if (autoSw.isChecked) 0.55f else 1f
-                          "auto" -> if (autoSw.isChecked) 1f else 0.55f
-                          else -> 1f
-                      }
-                  }
-              }
-
-              private fun capture() {
-                  for ((k, e) in live) values[k] = e.text.toString()
-                  timedSw?.let { timed = it.isChecked }
-                  perfSw?.let { perf = it.isChecked }
-                  watchSw?.let { watch = it.isChecked }
-                  zoneSw?.let { zone = it.isChecked }
-              }
-
-              private fun showTab(tab: String, grab: Boolean) {
-                  if (grab) capture()
-                  current = tab
-                  content.removeAllViews(); live.clear(); timedSw = null; perfSw = null; watchSw = null; zoneSw = null
-                  if (tab == "auto") {
-                      val (c, sw) = switchField("Fixed-length hold",
-                          "Press for a calculated time and let the system lift the finger. Most accurate, and it learns from where each bridge lands.",
-                          timed, "auto")
-                      timedSw = sw; content.addView(c)
-                      val (c2, sw2) = switchField("Perfect memory",
-                          "Remembers every round (Perfect, landed, Game Over) and reuses what it learned for similar bridges. A tag beside the anchor shows what usually happened on bridges like this one: Perfect, Record (landed, no bonus), Game Over, or New when nothing is stored. Game Overs count for less than Perfects, since one late press can cause one.",
-                          perf, "auto")
-                      perfSw = sw2; content.addView(c2)
-                      val (c3, sw3) = switchField("Hold and watch",
-                          "Keeps the finger down and watches the pole, which goes up and down while held. Far targets: lets go on the way up at the right height. Close targets: lets the pole pass and lets go on the way down. Replaces the fixed-length hold while it is on; if the hold does not register it falls back to fixed-length.",
-                          watch, "auto")
-                      watchSw = sw3; content.addView(c3)
-                      val (c4, sw4) = switchField("Safe-zone test",
-                          "Warning: this plays on purpose a few px off the dot, to find where a Game Over starts, and a Game Over ends your attempt. It only tests the most common bridges, closest to the dot first, and stops pushing on a side once a Game Over has happened there. Test rounds are kept out of the book. Switch it off to play for score.",
-                          zone, "auto")
-                      zoneSw = sw4; content.addView(c4)
-                  }
-                  for (o in Prefs.BRIDGE.filter { it.tab == tab }) {
-                      val (c, et) = numberField(o, values[o.key]?.toFloatOrNull() ?: o.def)
-                      live[o.key] = et; content.addView(c)
-                  }
-                  if (tab == "auto")
-                      content.addView(bigButton("Perfect book (" + PerfBook.load(this).size + ")", Ui.purple, 16f, 56) {
-                          startActivity(Intent(this, PerfectBookActivity::class.java))
-                      })
-                  if (tab == "auto")
-                      content.addView(bigButton("Safe-zone test results", Ui.blue, 16f, 56) {
-                          startActivity(Intent(this, ZoneTestActivity::class.java))
-                      })
-                  updateTabLooks()
-              }
-
-              private fun resetTab() {
-                  for (o in Prefs.BRIDGE.filter { it.tab == current }) values[o.key] = Prefs.fmt(o.def)
-                  if (current == "auto") { timed = true; perf = true; watch = false; zone = false }
-                  showTab(current, false)
-                  Toast.makeText(this, "This tab is back to default", Toast.LENGTH_SHORT).show()
               }
 
               private fun save() {
-                  capture()
                   val e = Prefs.of(this).edit()
                   for (o in Prefs.BRIDGE) {
-                      var v = values[o.key]?.toFloatOrNull() ?: o.def
+                      val et = fields[o.key] ?: continue
+                      var v = et.text.toString().toFloatOrNull() ?: o.def
                       if (o.key == "holdWait") v = v.coerceIn(0f, 60f)
                       e.putFloat(o.key, v)
                   }
-                  e.putBoolean("auto_bridge", autoSw.isChecked).putBoolean("timedAlways", timed).putBoolean("perfMem", perf).putBoolean("holdWatch", watch).putBoolean("zoneTest", zone).apply()
+                  e.putBoolean("holdWatch", watchSw.isChecked).putBoolean("timedAlways", timedSw.isChecked)
+                      .putBoolean("perfMem", perfSw.isChecked).apply()
               }
 
-              override fun onResume() {
-                  super.onResume()
-                  if (current == "auto") showTab("auto", true)   // refresh the Perfect book count after coming back
+              private fun reset() {
+                  Prefs.resetBridge(this)
+                  for (o in Prefs.BRIDGE) fields[o.key]?.setText(Prefs.fmt(o.def))
+                  timedSw.isChecked = true; watchSw.isChecked = false; perfSw.isChecked = true
+                  Toast.makeText(this, "Bridge Mode is back to default", Toast.LENGTH_SHORT).show()
               }
 
               override fun onPause() { super.onPause(); save() }
@@ -651,7 +579,6 @@ jobs:
               @Volatile private var swap = false   // some devices deliver red/blue swapped
               private var capW = 1; private var capH = 1
               private var leadMs = 100f; private var aimFrac = 0.5f
-              private var beatMs = 150f                 // spacing of the countdown beats, 0 = off
               private val played = BooleanArray(4)      // which countdown beats were already given this hold
               private var lastRate = 0f
               private var tone: ToneGenerator? = null
@@ -691,11 +618,6 @@ jobs:
               private var usedSug: PerfBook.Suggest? = null; private var usedHow = ""
               private var perfectWatch = false; private var perfectSeen = false
               private var bookSize = 0
-              // safe-zone test: on the most common bridges, aim a few px off the dot on purpose and record what happens
-              private var zoneTestOn = false; private var zoneTop = 6
-              private var testRound = false; private var testPlan = 0f; private var skipLearn = false
-              private var pendGap = 0f; private var pendPw = 0f
-              private var zoneCache: List<ZoneBook.Rec> = emptyList(); private var zoneAt = 0L
               private var roundNo = 0                      // rounds played since Start or the last Game Over
               private var rejectRun = 0                    // odd rounds in a row that the timing model ignored
               private var bookCache: List<PerfBook.Entry> = emptyList(); private var bookAt = 0L
@@ -767,13 +689,12 @@ jobs:
 
                   val prefs = getSharedPreferences("p", MODE_PRIVATE)
                   leadMs = prefs.getFloat("lead", 100f); aimFrac = prefs.getFloat("aim", 0.5f).coerceIn(0f, 1f)
-                  beatMs = prefs.getFloat("beat", 150f).coerceIn(0f, 400f)
                   timedAdjMs = prefs.getFloat("timedAdj", 12f)
                   holdWaitMs = (prefs.getFloat("holdWait", 10f).coerceIn(0f, 60f) * 1000f).toLong()
                   pressFx = (prefs.getFloat("pressX", 52f) / 100f).coerceIn(0.05f, 0.95f)
                   pressFy = (prefs.getFloat("pressY", 45f) / 100f).coerceIn(0.05f, 0.95f)
                   towerMode = prefs.getString("mode", "bridge") == "tower"
-                  autoEnabled = if (towerMode) prefs.getBoolean("auto_tower", true) else prefs.getBoolean("auto_bridge", true)
+                  autoEnabled = if (towerMode) prefs.getBoolean("auto_tower", true) else true
                   timedAlways = prefs.getBoolean("timedAlways", true)
                   rateEst = prefs.getFloat("rateEst", 334f)
                   if (rateEst !in 280f..380f || timedAdjMs !in -50f..60f) {      // learned timing drifted somewhere unphysical: start again from the measured values
@@ -785,8 +706,6 @@ jobs:
                   bookSize = PerfBook.load(this).size
                   holdWatch = prefs.getBoolean("holdWatch", false)
                   hwNear = prefs.getFloat("hwNear", 100f).coerceIn(30f, 200f)
-                  zoneTestOn = prefs.getBoolean("zoneTest", false)
-                  zoneTop = prefs.getFloat("zoneTop", 6f).toInt().coerceIn(1, 30)
                   tFightWait = prefs.getFloat("tFightWait", 2500f).toLong(); tSkipWait = prefs.getFloat("tSkipWait", 2500f).toLong()
                   tOkWait = prefs.getFloat("tOkWait", 1500f).toLong(); tStuck = prefs.getFloat("tStuck", 3f).toInt().coerceAtLeast(1)
                   prefs.edit().putBoolean("running", true).apply()
@@ -1165,15 +1084,14 @@ jobs:
                       return cols > (bx1 - bx0) * 0.4f
                   }
                   // what happened on bridges like this one before? The overlay tag shows whichever result is the most common
-                  if (autoEnabled && perfMemOn && autoState == 0 && !autoActive) {
+                  if (autoEnabled && autoState == 0 && !autoActive) {
                       bookCounts = PerfBook.counts(bookNow(), aimNow, pmTol)
                       bookTag = PerfBook.tagFor(bookCounts)
-                  } else if (!autoEnabled || !perfMemOn) bookTag = 0
-                  if (zoneTestOn && autoEnabled && !paused && autoState == 0 && !autoActive && zoneOffsetFor(m[0], m[1]) != null) bookTag = 5
+                  } else if (!autoEnabled) bookTag = 0
                   fun idleState(len: Float) = GuideState(true, m[3], m[2], m[0] + 0.2f * m[1], m[0] + 0.8f * m[1], aimNow, 0f, 0, W,
                       "bridge gap=%.0f w=%.0f dot=%s tip=%.0f auto=%s%s".format(m[0], m[1], if (m[4] > 0f) "yes" else "no", len,
                           if (paused) "PAUSED" else if (autoEnabled) "on" else "off",
-                          (if (autoEnabled && !paused) " (" + autoNote() + ")" else "") + (if (perfMemOn && autoEnabled) " book=" + bookSize + " [P" + bookCounts[0] + " R" + bookCounts[1] + " G" + bookCounts[2] + "]" else "")), bookTag)
+                          (if (autoEnabled && !paused) " (" + autoNote() + ")" else "") + (if (autoEnabled) " book=" + bookSize + " [P" + bookCounts[0] + " R" + bookCounts[1] + " G" + bookCounts[2] + "]" else "")), bookTag)
 
                   // 4) is a pole starting to grow? (needs the tip to rise over several frames in a row)
                   // right end of a fallen pole lying across the gap (rows around the platform top); -1 if none
@@ -1276,16 +1194,7 @@ jobs:
                   val due = remaining <= 0f || (rate > 1f && remaining <= rate * leadMs / 1000f)
                   lastRate = rate
                   val phase = when { len > hi -> 3; due -> 2; else -> 1 }
-                  // countdown: 3 evenly spaced beats, then the release cue is the 4th beat
-                  if (beatMs > 0f && rate > 1f && !due && !autoActive) {
-                      val after = remaining / rate * 1000f - leadMs      // ms until the release cue
-                      for (k in 1..3) if (!played[k] && after > 0f && after <= k * beatMs) {
-                          for (j in k..3) played[j] = true
-                          vibrate(25, 120); beep(false)
-                          break
-                      }
-                  }
-                  if (phase == 2 && !cued) { cued = true; if (autoActive) autoRelease() else { vibrate(80, 255); beep(true) } }
+                  if (phase == 2 && !cued) { cued = true; if (autoActive) autoRelease() }
                   if (phase == 3 && autoActive) autoRelease()
                   publish(GuideState(true, fTop.toFloat(), fBase.toFloat(), lo, hi, aim, len, phase, fW,
                       "gap=%.0f w=%.0f len=%.0f rate=%.0f/s lead=%.0f%s".format(fGap, fPw, len, rate, leadMs, if (autoActive) " AUTO" else "")))
@@ -1308,7 +1217,6 @@ jobs:
                * until then we only shift the hold time by the error.
                */
               private fun finishLanding(W: Int) {
-                  if (skipLearn) { skipLearn = false; bridgeTipMax = -1; return }
                   val tip = bridgeTipMax; bridgeTipMax = -1
                   if (watchRound) { finishWatch(tip, W); return }
                   if (tip < 0 || !pressTimed || pressDur <= 0L) return
@@ -1354,21 +1262,10 @@ jobs:
                   val haveL = lObs >= 15f && abs(lObs - pressAim) <= 80f
                   val err = if (haveL) lObs - pressAim else 0f
                   val outcome = if (perfectSeen) 0 else if (gameOverSeen) 2 else 1
-                  if (testRound) {                              // a safe-zone test round: keep it out of the book, the counters and the learning
-                      testRound = false; skipLearn = true
-                      ZoneBook.add(this, ZoneBook.Rec(pressGap, pressPw, testPlan, if (haveL) err else testPlan, outcome))
-                      zoneAt = 0L
-                      val ended = if (haveL) " (ended " + abs(err.toInt()) + " px " + (if (err > 0f) "long" else "short") + ")" else ""
-                      val tl = "#" + roundNo + " ZONE TEST " + "%+.1f".format(testPlan) + " px | gap " + pressGap.toInt() + " w " + pressPw.toInt() +
-                          " | " + (when (outcome) { 0 -> "Perfect"; 2 -> "Game Over"; else -> "landed" }) + ended
-                      EventLog.add(this, tl); status(tl, true)
-                      if (outcome == 2) roundNo = 0
-                      return
-                  }
                   // a "Perfect" whose hold is far from what the timing model says is probably a misread: do not let it into the book
                   val odd = outcome == 0 && pressTimed && abs(pressDur - PerfBook.bookModel(bookNow(), pressAim, pressAim / rateEst * 1000f + timedAdjMs)) > 60f
                   var saved = false
-                  if (perfMemOn && !odd && (haveL || outcome == 0)) {
+                  if (!odd && (haveL || outcome == 0)) {                       // always recorded: the switch only decides whether the book is used for holds
                       bookSize = PerfBook.record(this, pressAim, pressGap, pressPw, if (pressTimed) pressDur.toFloat() else -1f, err, outcome)
                       saved = true
                   }
@@ -1377,8 +1274,12 @@ jobs:
                   PerfBook.addStat(this, sug != null, perfectSeen)
                   bookAt = 0L
                   val off = err.toInt()
-                  val side = if (haveL) " (" + abs(off) + " px " + (if (off > 0) "long" else "short") + ")" else ""
-                  val res = when (outcome) { 0 -> "Perfect"; 2 -> "Game Over" + side; else -> "landed, no bonus" + side }
+                  val side = if (haveL) " (" + abs(off) + " px " + (if (off > 0) "long" else "short") + " of the dot)" else ""
+                  val res = when (outcome) {
+                      0 -> "Perfect"
+                      2 -> if (haveL) "Game Over: " + (if (off > 0) "went over the platform" else "did not reach the platform") + side else "Game Over"
+                      else -> "landed, no bonus" + side
+                  }
                   val src = if (sug != null) "book used: " + usedHow else "no book entry"
                   val how = if (pressTimed) "hold " + pressDur + " ms"
                             else "watch, let go " + (if (hwDir > 0) "going up" else if (hwDir < 0) "coming down" else "(no release seen)")
@@ -1405,23 +1306,6 @@ jobs:
                   val t = SystemClock.elapsedRealtime()
                   if (t - bookAt > 1500L) { bookCache = PerfBook.load(this); bookAt = t }
                   return bookCache
-              }
-
-              private fun zoneNow(): List<ZoneBook.Rec> {
-                  val t = SystemClock.elapsedRealtime()
-                  if (t - zoneAt > 1500L) { zoneCache = ZoneBook.load(this); zoneAt = t }
-                  return zoneCache
-              }
-
-              /** Safe-zone test: how far off the dot (px, + long, - short) to aim on this bridge, or null when it is not a bridge being tested. */
-              private fun zoneOffsetFor(gap: Float, w: Float): Float? {
-                  if (!zoneTestOn || gap <= 0f || w <= 0f) return null
-                  val book = bookNow()
-                  if (book.sumOf { it.count } >= 20) {                 // with some history only the most common bridges are tested
-                      val top = PerfBook.topCombos(book, zoneTop)
-                      if (top.none { abs(it.first - gap) <= 2f && abs(it.second - w) <= 2f }) return null
-                  }
-                  return ZoneBook.nextOffset(zoneNow(), gap, w)
               }
 
               /** Is the violet "Game Over" band across the middle of the screen showing? */
@@ -1514,7 +1398,6 @@ jobs:
                   val now = SystemClock.elapsedRealtime()
                   when (autoState) {
                       0 -> if (now >= readyAtMs && !autoActive && hist.size >= 3) {
-                          pendGap = gap; pendPw = pw
                           if (startAuto(aim, now)) { roundNo++; autoState = 1; pressGap = gap; pressPw = pw; pressBase = base }
                       }
                       2 -> {
@@ -1553,8 +1436,6 @@ jobs:
                   pressTimed = useTimed || (if (holdWatch) false else (timedAlways || aim < 100f))
                   watchRound = holdWatch && !pressTimed
                   pressAim = aim
-                  val zoneOff = zoneOffsetFor(pendGap, pendPw)          // safe-zone test: aim a little off the dot on purpose
-                  testRound = zoneOff != null; testPlan = zoneOff ?: 0f
                   usedSug = null; usedHow = ""
                   hwDir = 0; hwPending = 0; hwSawAbove = false; hwTarget = aim
                   pressedAtMs = now; autoToken = now; lastVisibleMs = now
@@ -1566,27 +1447,23 @@ jobs:
                           val sg = PerfBook.suggestDur(bookNow(), aim, pmTol, rateEst, prior)
                           if (sg != null) { dur = max(60L, sg.value.toLong()); usedSug = sg; usedHow = sg.how }
                       }
-                      if (testRound) dur = max(60L, dur + (testPlan / rateEst * 1000f).toLong())
                       pressDur = dur
                       if (!svc.holdFor(x, y, dur)) { status("press was refused by Android", true); readyAtMs = now + 3000L; return false }
                       autoActive = true; hwActive = false
                       bg.postDelayed({ if (autoActive && autoToken == token) autoRelease() }, dur + 150)   // the stroke ends by itself
-                      status("holding at ${x.toInt()},${y.toInt()} for $dur ms (aim ${aim.toInt()})" + (if (usedHow.isNotEmpty()) " [book: $usedHow]" else "") +
-                          (if (testRound) " [ZONE TEST: aiming %+.1f px off the dot]".format(testPlan) else ""), true)
+                      status("holding at ${x.toInt()},${y.toInt()} for $dur ms (aim ${aim.toInt()})" + (if (usedHow.isNotEmpty()) " [book: $usedHow]" else ""), true)
                   } else {
                       if (perfMemOn && watchRound) {
                           val sg = PerfBook.suggestTarget(bookNow(), aim, pmTol)
                           if (sg != null) { hwTarget = aim + sg.value; usedSug = sg; usedHow = sg.how }
                       }
-                      if (testRound) hwTarget += testPlan
                       pressDur = 0L
                       if (!svc.press(x, y)) { status("press was refused by Android", true); readyAtMs = now + 3000L; return false }
                       autoActive = true; hwActive = watchRound
                       // safety net: a watched hold may last about two loops of the pole, a normal one only until the aim
                       bg.postDelayed({ if (autoActive && autoToken == token) autoRelease() }, if (watchRound) 4000L else max(400f, ms + 600f).toLong())
                       status("holding at ${x.toInt()},${y.toInt()}, " + (if (watchRound) "watching the pole, target " + hwTarget.toInt() + " px" else "release at aim " + aim.toInt()) +
-                          (if (usedHow.isNotEmpty()) " [book: $usedHow]" else "") +
-                          (if (testRound) " [ZONE TEST: aiming %+.1f px off the dot]".format(testPlan) else ""), true)
+                          (if (usedHow.isNotEmpty()) " [book: $usedHow]" else ""), true)
                   }
                   return true
               }
@@ -1671,11 +1548,11 @@ jobs:
                   }
                   fill(c); cv.drawCircle(ax, ly, 7 * d, paint)
                   if (s.book != 0) {                           // what usually happened on bridges like this one
-                      val tag = when (s.book) { 2 -> "Perfect"; 3 -> "Record"; 4 -> "Game Over"; 5 -> "Test"; else -> "New" }
+                      val tag = when (s.book) { 2 -> "Perfect"; 3 -> "Record"; 4 -> "Game Over"; else -> "New" }
                       paint.textSize = 11 * d; paint.typeface = Typeface.DEFAULT_BOLD
                       val tw = paint.measureText(tag) + 16 * d
                       val cy = ly - 26 * d
-                      fill(when (s.book) { 2 -> Ui.green; 3 -> Ui.teal; 4 -> Ui.red; 5 -> Ui.purple; else -> Color.argb(230, 120, 132, 150) })
+                      fill(when (s.book) { 2 -> Ui.green; 3 -> Ui.teal; 4 -> Ui.red; else -> Color.argb(230, 120, 132, 150) })
                       cv.drawRoundRect(RectF(ax - tw / 2, cy - 11 * d, ax + tw / 2, cy + 11 * d), 8 * d, 8 * d, paint)
                       paint.color = Color.WHITE; paint.textAlign = Paint.Align.CENTER
                       cv.drawText(tag, ax, cy + 4 * d, paint)
@@ -1780,23 +1657,66 @@ jobs:
               }
 
               /**
-               * The hold time (ms) for this distance: the typical hold of the rounds stored nearby, together with the timing model
-               * (model = aim / speed + adjust, in ms). A Perfect round counts for 3, a landed one for 1 and a Game Over for half,
-               * because one late press can cause a Game Over. Null when nothing is stored nearby.
+               * The hold time (ms) for this distance. Perfect is the same every time, so once there are 3 Perfect rounds nearby the
+               * hold that gave them is the target (their typical value). Before that, the other rounds show which way and how far to
+               * adjust: a bridge that fell short or went over moves the hold by the difference. Null when nothing is stored nearby.
                */
               fun suggestDur(list: List<Entry>, aim: Float, tol: Float, rate: Float, model: Float): Suggest? {
                   val near = list.filter { it.dur > 0f && abs(it.aim - aim) <= tol }
                   if (near.isEmpty()) return null
                   val vals = ArrayList<Pair<Float, Float>>()
-                  vals.add(Pair(model, 3f))                 // the model counts like three rounds, so a few odd rounds cannot move a distance far
-                  for (e in near) {
-                      val here = e.dur + (aim - e.aim) / rate * 1000f             // that hold, moved to this distance
-                      val v = if (e.outcome == 0) here else here - e.err / rate * 1000f   // Perfect: it worked. Others: the hold that would have
-                      val wt = e.count * (if (e.outcome == 0) 3f else if (e.outcome == 1) 1f else 0.5f) / (1f + abs(e.aim - aim))
-                      vals.add(Pair(v, wt))
+                  val perfectRounds = near.filter { it.outcome == 0 }.sumOf { it.count }
+                  val how: String
+                  if (perfectRounds >= 3) {
+                      for (e in near) if (e.outcome == 0)
+                          vals.add(Pair(e.dur + (aim - e.aim) / rate * 1000f, e.count / (1f + abs(e.aim - aim))))
+                      how = describe(near) + ", the Perfect hold"
+                  } else {
+                      vals.add(Pair(model, 1f))                                       // the timing model counts as one round
+                      for (e in near) {
+                          val here = e.dur + (aim - e.aim) / rate * 1000f            // that hold, moved to this distance
+                          val v = if (e.outcome == 0) here else here - e.err / rate * 1000f   // Perfect: it worked. Others: the hold that would have
+                          vals.add(Pair(v, e.count * (if (e.outcome == 0) 3f else if (e.outcome == 1) 2f else 1f) / (1f + abs(e.aim - aim))))
+                      }
+                      how = describe(near) + ", adjusted from the misses"
                   }
                   val nearest = near.minByOrNull { abs(it.aim - aim) } ?: return null
-                  return Suggest(wmedian(vals), nearest.aim, nearest.gap, nearest.w, near.size, describe(near) + ", typical hold")
+                  return Suggest(wmedian(vals), nearest.aim, nearest.gap, nearest.w, near.size, how)
+              }
+
+              /** The typical hold (ms) of the Perfect rounds in this list, or null when there are none. */
+              fun typicalHold(list: List<Entry>): Float? {
+                  val v = list.filter { it.outcome == 0 && it.dur > 0f }.map { Pair(it.dur, it.count.toFloat()) }
+                  return if (v.isEmpty()) null else wmedian(v)
+              }
+
+              /** Remove every entry at this distance. Returns how many. */
+              fun removeDistance(c: Context, aim: Float): Int {
+                  val list = load(c)
+                  val before = list.size
+                  list.removeAll { abs(it.aim - aim) <= 1.5f }
+                  save(c, list)
+                  return before - list.size
+              }
+
+              /** Old entries are per gap and width; only the distance matters. Merge those with the same distance, method and result. Returns how many were merged away. */
+              fun convert(c: Context): Int {
+                  val list = load(c).sortedBy { it.aim }
+                  val out = ArrayList<Entry>()
+                  for (e in list) {
+                      val m = out.firstOrNull { it.outcome == e.outcome && (it.dur > 0f) == (e.dur > 0f) && abs(it.aim - e.aim) <= 1.5f }
+                      if (m == null) { out.add(e); continue }
+                      val n = m.count; val k = e.count; val t = (n + k).toFloat()
+                      if (m.dur > 0f && e.dur > 0f) m.dur = (m.dur * n + e.dur * k) / t
+                      m.err = (m.err * n + e.err * k) / t
+                      m.gap = (m.gap * n + e.gap * k) / t
+                      m.w = (m.w * n + e.w * k) / t
+                      m.aim = (m.aim * n + e.aim * k) / t
+                      m.count = n + k; m.uses += e.uses; m.usesPerfect += e.usesPerfect
+                  }
+                  val merged = list.size - out.size
+                  if (merged > 0) save(c, out)
+                  return merged
               }
 
               /**
@@ -1828,17 +1748,6 @@ jobs:
                   val slope = (if (den > 1e-9) num / den else 3.0).toFloat().coerceIn(2.4f, 3.6f)   // ms per px: 2.4 = 417 px/s, 3.6 = 278 px/s
                   val edge = if (aim < pts.first().first) pts.first() else pts.last()
                   return edge.second + (aim - edge.first) * slope
-              }
-
-              /** The most common bridges in the book: (gap, width, rounds), the one with the most rounds first. */
-              fun topCombos(list: List<Entry>, n: Int): List<Triple<Float, Float, Int>> {
-                  val groups = ArrayList<Triple<Float, Float, Int>>()
-                  for (e in list) {
-                      val i = groups.indexOfFirst { abs(it.first - e.gap) <= 2f && abs(it.second - e.w) <= 2f }
-                      if (i >= 0) { val g = groups[i]; groups[i] = Triple(g.first, g.second, g.third + e.count) }
-                      else groups.add(Triple(e.gap, e.w, e.count))
-                  }
-                  return groups.sortedByDescending { it.third }.take(n)
               }
 
               /** Remove Perfect entries whose hold is far from what the timing model says for that distance (a false Perfect). Returns how many. */
@@ -1884,14 +1793,13 @@ jobs:
               /** Remember one round. Rounds with the same result and almost the same bridge are merged (averaged). Returns the book size. */
               fun record(c: Context, aim: Float, gap: Float, w: Float, dur: Float, err: Float, outcome: Int): Int {
                   val list = load(c)
-                  val e = list.firstOrNull {
-                      it.outcome == outcome && (it.dur > 0f) == (dur > 0f) &&
-                          abs(it.aim - aim) <= 1f && abs(it.gap - gap) <= 2f && abs(it.w - w) <= 2f
-                  }
+                  val e = list.firstOrNull { it.outcome == outcome && (it.dur > 0f) == (dur > 0f) && abs(it.aim - aim) <= 1f }   // only the distance matters
                   if (e != null) {
                       val n = e.count
                       if (dur > 0f && e.dur > 0f) e.dur = (e.dur * n + dur) / (n + 1)
                       e.err = (e.err * n + err) / (n + 1)
+                      e.gap = (e.gap * n + gap) / (n + 1)
+                      e.w = (e.w * n + w) / (n + 1)
                       e.count = n + 1
                   } else {
                       list.add(Entry(aim, gap, w, dur, err, outcome, 1, 0, 0))
@@ -1981,34 +1889,32 @@ jobs:
           import android.graphics.Typeface
           import android.os.Bundle
           import android.view.Gravity
-          import android.view.ViewGroup.LayoutParams.MATCH_PARENT
           import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
-          import android.widget.Toast
           import android.widget.LinearLayout
           import android.widget.TextView
+          import android.widget.Toast
           import kotlin.math.abs
 
           class PerfectBookActivity : Activity() {
               private var confirm = false
-              private var filter = -1                        // -1 all, 0 Perfect, 1 landed, 2 Game Over
-              private lateinit var listBox: LinearLayout
-              private val filterViews = ArrayList<TextView>()
-              private var all: List<PerfBook.Entry> = emptyList()
+
+              /** All the entries at one distance. */
+              private class Grp(val aim: Float, val list: MutableList<PerfBook.Entry>)
 
               override fun onCreate(b: Bundle?) {
                   super.onCreate(b)
                   val col = buildScreen("Perfect book", true)
-                  all = PerfBook.load(this).sortedBy { it.aim }
+                  val all = PerfBook.load(this).sortedBy { it.aim }
 
-                  col.addView(label("Every auto round is saved with how it ended: Perfect, landed (Record), or Game Over. Before a hold, the app takes the typical hold (the median) of the rounds stored nearby, together with its timing model, so one odd round cannot drag a distance off. Game Overs count for less than Perfects, because one late press can cause one. The tag beside the anchor shows the most common result for the bridge in front of you.", 13f, Ui.muted)
+                  col.addView(label("The pole has to reach the blue dot, so everything is saved by that distance. Perfect is the same every time: once a distance has 3 Perfect rounds, the hold that gave them is the target for it. Before that, a bridge that fell short or went over moves the next hold by the difference. Every round is recorded, whether or not the book is used for holds.", 13f, Ui.muted)
                       .apply { setPadding(0, 0, 0, dp(14)) })
 
                   // does the book help?
                   val st = PerfBook.stats(this)
                   val sc = card()
                   sc.addView(label("Does the book help?", 16f, bold = true))
-                  sc.addView(label("With a book entry: " + st[0] + " rounds, " + st[1] + " Perfect" + pct(st[1], st[0]), 14f).apply { setPadding(0, dp(6), 0, 0) })
-                  sc.addView(label("Without one: " + st[2] + " rounds, " + st[3] + " Perfect" + pct(st[3], st[2]), 14f).apply { setPadding(0, dp(2), 0, 0) })
+                  sc.addView(label("Book used: " + st[0] + " rounds, " + st[1] + " Perfect" + pct(st[1], st[0]), 14f).apply { setPadding(0, dp(6), 0, 0) })
+                  sc.addView(label("Book not used: " + st[2] + " rounds, " + st[3] + " Perfect" + pct(st[3], st[2]), 14f).apply { setPadding(0, dp(2), 0, 0) })
                   val perfect = all.filter { it.outcome == 0 }.sumOf { it.count }
                   val landed = all.filter { it.outcome == 1 }.sumOf { it.count }
                   val over = all.filter { it.outcome == 2 }.sumOf { it.count }
@@ -2017,30 +1923,26 @@ jobs:
 
                   col.addView(bigButton("Activity log", Ui.blue, 16f, 56) { startActivity(Intent(this, EventLogActivity::class.java)) })
                   col.addView(bigButton("Backup and restore", Ui.teal, 16f, 56) { startActivity(Intent(this, BackupActivity::class.java)) })
-                  col.addView(bigButton("Tidy up odd entries", Ui.orange, 16f, 56) {
+                  col.addView(bigButton("Convert and tidy the old book", Ui.orange, 16f, 56) {
                       val pr = Prefs.of(this)
-                      val n = PerfBook.tidy(this, pr.getFloat("rateEst", 295f), pr.getFloat("timedAdj", 0f))
-                      Toast.makeText(this, if (n == 0) "Nothing odd found" else "Removed " + n + " Perfect entries that did not fit the timing", Toast.LENGTH_LONG).show()
-                      if (n > 0) recreate()
+                      val merged = PerfBook.convert(this)
+                      val removed = PerfBook.tidy(this, pr.getFloat("rateEst", 334f), pr.getFloat("timedAdj", 12f))
+                      Toast.makeText(this, "Merged " + merged + " entries by distance, removed " + removed + " that did not fit", Toast.LENGTH_LONG).show()
+                      recreate()
                   })
 
-                  // filter: All / Perfect / Landed / Game Over
-                  val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-                  val names = arrayOf("All", "Perfect", "Landed", "Game Over")
-                  for (k in 0..3) {
-                      val t = TextView(this).apply {
-                          text = names[k]; textSize = 13f; setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD
-                          gravity = Gravity.CENTER; isClickable = true
-                          setOnClickListener { filter = k - 1; styleFilters(); showList() }
-                      }
-                      filterViews.add(t)
-                      row.addView(t, LinearLayout.LayoutParams(0, dp(42), 1f).apply { if (k > 0) leftMargin = dp(6) })
+                  // one card per distance
+                  val groups = ArrayList<Grp>()
+                  for (e in all) {
+                      val g = groups.firstOrNull { abs(it.aim - e.aim) <= 1.5f }
+                      if (g != null) g.list.add(e) else groups.add(Grp(e.aim, mutableListOf(e)))
                   }
-                  col.addView(row, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { bottomMargin = dp(12) })
-
-                  listBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-                  col.addView(listBox)
-                  styleFilters(); showList()
+                  if (groups.isEmpty()) {
+                      val c = card()
+                      c.addView(label("Nothing saved yet. Rounds appear here while Auto plays.", 15f))
+                      col.addView(c)
+                  }
+                  for (g in groups) col.addView(distanceCard(g))
 
                   if (all.isNotEmpty()) {
                       val btn = bigButton("Clear book and counters", Ui.red, 16f, 56) { }
@@ -2052,49 +1954,42 @@ jobs:
                   }
               }
 
-              private fun styleFilters() {
-                  for (k in 0..3) {
-                      val sel = (k - 1) == filter
-                      val c = when (k) { 1 -> Ui.green; 2 -> Ui.teal; 3 -> Ui.red; else -> Ui.blue }
-                      filterViews[k].background = rounded(if (sel) c else Ui.mix(c, Ui.card, 0.30f), 12)
-                  }
-              }
-
-              private fun showList() {
-                  listBox.removeAllViews()
-                  val shown = if (filter < 0) all else all.filter { it.outcome == filter }
-                  if (shown.isEmpty()) {
-                      val c = card()
-                      c.addView(label(if (all.isEmpty()) "Nothing saved yet. Rounds appear here while Auto plays." else "No rounds with this result yet.", 15f))
-                      listBox.addView(c)
-                  }
-                  for (e in shown) listBox.addView(entryCard(e))
-              }
-
               private fun pct(a: Int, n: Int): String = if (n > 0) " (" + (100 * a / n) + "%)" else ""
 
-              private fun entryCard(e: PerfBook.Entry): LinearLayout {
+              private fun distanceCard(g: Grp): LinearLayout {
                   val c = card()
+                  val rounds = g.list.sumOf { it.count }
+                  val p = g.list.filter { it.outcome == 0 }.sumOf { it.count }
+                  val l = g.list.filter { it.outcome == 1 }.sumOf { it.count }
+                  val short = g.list.filter { it.outcome == 2 && it.err < 0f }.sumOf { it.count }
+                  val over = g.list.filter { it.outcome == 2 && it.err >= 0f }.sumOf { it.count }
                   val head = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-                  head.addView(label("Distance to the dot: " + e.aim.toInt() + " px", 16f, bold = true), LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
-                  val off = e.err.toInt()
-                  val dir = if (off > 0) "long" else "short"
-                  val (mark, color) = when (e.outcome) {
-                      0 -> "PERFECT" to Ui.green
-                      2 -> "GAME OVER " + dir to Ui.red
-                      else -> "LANDED " + dir to Ui.teal
-                  }
-                  head.addView(chip(mark, color))
+                  head.addView(label("Distance to the dot: " + Math.round(g.aim) + " px", 16f, bold = true), LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+                  head.addView(chip(rounds.toString() + " rounds", Ui.blue))
                   c.addView(head)
-                  c.addView(label("Gap " + e.gap.toInt() + " px   \u00b7   Width " + e.w.toInt() + " px", 13f, Ui.muted).apply { setPadding(0, dp(4), 0, 0) })
-                  val how = if (e.dur > 0f) "Hold " + e.dur.toInt() + " ms" else "Hold and watch"
-                  c.addView(label(how + "   \u00b7   ended " + abs(off) + " px " + dir + "   \u00b7   seen x" + e.count, 14f).apply { setPadding(0, dp(4), 0, 0) })
-                  c.addView(label("Reused " + e.uses + "x, Perfect " + e.usesPerfect + "x", 12f, Ui.muted).apply { setPadding(0, dp(2), 0, dp(6)) })
+
+                  val typ = PerfBook.typicalHold(g.list)
+                  c.addView(label(if (typ != null) "Perfect hold: " + Math.round(typ) + " ms" else "No Perfect yet at this distance", 14f)
+                      .apply { setPadding(0, dp(6), 0, 0) })
+                  c.addView(label("Perfect " + p + " (" + (100 * p / rounds) + "%)   \u00b7   Landed " + l, 14f).apply { setPadding(0, dp(2), 0, 0) })
+                  if (short + over > 0)
+                      c.addView(label("Game Over: did not reach the platform " + short + "   \u00b7   went over the platform " + over, 14f, Ui.red)
+                          .apply { setPadding(0, dp(2), 0, 0) })
+                  val miss = g.list.filter { it.outcome != 0 }
+                  val missRounds = miss.sumOf { it.count }
+                  if (missRounds > 0) {
+                      val avg = miss.sumOf { (it.err * it.count).toDouble() } / missRounds
+                      c.addView(label("Rounds that were not Perfect ended " + Math.abs(Math.round(avg)) + " px " + (if (avg >= 0) "long" else "short") + " of the dot on average", 12f, Ui.muted)
+                          .apply { setPadding(0, dp(2), 0, 0) })
+                  }
+                  val reused = g.list.sumOf { it.uses }; val reusedP = g.list.sumOf { it.usesPerfect }
+                  c.addView(label("Book reused " + reused + "x, Perfect " + reusedP + "x", 12f, Ui.muted).apply { setPadding(0, dp(2), 0, dp(6)) })
+
                   val rm = TextView(this).apply {
-                      text = "Remove this entry"; textSize = 13f; setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD
+                      text = "Remove this distance"; textSize = 13f; setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD
                       gravity = Gravity.CENTER; background = rounded(Ui.mix(Ui.red, Ui.card, 0.55f), 10)
                       setPadding(dp(12), dp(8), dp(12), dp(8)); isClickable = true
-                      setOnClickListener { PerfBook.remove(this@PerfectBookActivity, e); recreate() }
+                      setOnClickListener { PerfBook.removeDistance(this@PerfectBookActivity, g.aim); recreate() }
                   }
                   c.addView(rm, LinearLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT))
                   return c
@@ -2115,14 +2010,12 @@ jobs:
               class Opt(val key: String, val title: String, val desc: String, val def: Float, val tab: String)
 
               val BRIDGE = listOf(
-                  Opt("lead", "Reaction lead (ms)", "How early the release cue comes. Manual play uses it for the cue; auto uses it only when Fixed-length hold is off. It also adjusts itself after every release.", 100f, "general"),
+                  Opt("lead", "Reaction lead (ms)", "Hold and watch only: how many ms before the pole reaches the target the finger is lifted, to cover the delay of reading the screen and of the tap. It adjusts itself after every release.", 100f, "general"),
                   Opt("aim", "Aim point on the platform", "Used only when the blue dot is not found. 0 = near edge, 0.5 = middle, 1 = far edge.", 0.5f, "general"),
                   Opt("rateEst", "Pole growth speed", "How fast the pole grows, in capture pixels per second. Learned automatically.", 334f, "general"),
-                  Opt("beat", "Countdown beat spacing (ms)", "Three beeps, then release on the 4th. 0 turns the beeps off.", 150f, "manual"),
                   Opt("holdWait", "Wait before each hold (seconds)", "After a new platform appears, wait this long before holding again. 0 = hold at once, up to 60. Counts down in the status line as hold in ...s.", 10f, "auto"),
                   Opt("pmTol", "Perfect match tolerance (px)", "How close a stored Perfect must be, in distance to the dot, to be reused. About 3 is a good start.", 3f, "auto"),
                   Opt("hwNear", "Close-target limit (px)", "Hold and watch: below this distance to the dot the early rise is too hidden to measure, so it lets the pole pass and lets go on the way down. Above it, it lets go on the way up.", 100f, "auto"),
-                  Opt("zoneTop", "Bridges to test (most common)", "Safe-zone test only plays with this many of the most common gap and width combinations in the book. While the book has fewer than 20 rounds, every bridge is tested.", 6f, "auto"),
                   Opt("timedAdj", "Hold time adjust (ms)", "+ if bridges come out short, - if too long. It learns by itself from where each bridge lands.", 12f, "auto"),
                   Opt("pressX", "Press position X (%)", "Where auto presses, as a percent from the left of the screen.", 52f, "auto"),
                   Opt("pressY", "Press position Y (%)", "Percent from the top. The default is the middle of the sky, below the reward bar.", 45f, "auto")
@@ -2140,7 +2033,7 @@ jobs:
               fun resetBridge(c: Context) {
                   val e = of(c).edit()
                   BRIDGE.forEach { e.remove(it.key) }
-                  e.remove("auto_bridge"); e.remove("timedAlways"); e.remove("perfMem"); e.remove("holdWatch"); e.remove("zoneTest"); e.apply()
+                  e.remove("auto_bridge"); e.remove("timedAlways"); e.remove("perfMem"); e.remove("holdWatch"); e.apply()
               }
 
               fun resetTower(c: Context) {
@@ -2587,11 +2480,11 @@ jobs:
           }
 
           /** A number setting. The chip in the corner says whether it is for manual play, auto, or both. */
-          fun Activity.numberField(opt: Prefs.Opt, value: Float): Pair<LinearLayout, EditText> {
+          fun Activity.numberField(opt: Prefs.Opt, value: Float, showChip: Boolean = true): Pair<LinearLayout, EditText> {
               val c = card()
               val head = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
               head.addView(label(opt.title, 16f, bold = true), LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
-              head.addView(chip(Ui.chipText(opt.tab), Ui.chipColor(opt.tab)))
+              if (showChip) head.addView(chip(Ui.chipText(opt.tab), Ui.chipColor(opt.tab)))
               c.addView(head)
               c.addView(label(opt.desc, 12f, Ui.muted).apply { setPadding(0, dp(2), 0, dp(8)) })
               val et = EditText(this).apply {
@@ -2614,178 +2507,6 @@ jobs:
               c.addView(sw, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
               c.addView(label(desc, 12f, Ui.muted).apply { setPadding(0, dp(6), 0, 0) })
               return c to sw
-          }
-          BH_EOF
-          mkdir -p "$(dirname app/src/main/java/com/example/bridgehelper/ZoneTest.kt)"
-          cat > app/src/main/java/com/example/bridgehelper/ZoneTest.kt <<'BH_EOF'
-          package com.example.bridgehelper
-
-          import android.content.Context
-          import android.graphics.Canvas
-          import android.graphics.Color
-          import android.graphics.Paint
-          import android.view.View
-          import java.util.Locale
-          import kotlin.math.abs
-          import kotlin.math.max
-
-          /** Results of the safe-zone test: how far from the dot a bridge was aimed on purpose, and what happened. */
-          object ZoneBook {
-              /** plan = the offset aimed at (px, + long, - short); err = where the bridge really ended relative to the dot; outcome 0 Perfect, 1 landed, 2 Game Over. */
-              class Rec(val gap: Float, val w: Float, val plan: Float, val err: Float, val outcome: Int)
-
-              private const val KEY = "zoneBook"
-              private const val MAX = 400
-
-              fun load(c: Context): MutableList<Rec> {
-                  val s = Prefs.of(c).getString(KEY, "") ?: ""
-                  val out = ArrayList<Rec>()
-                  for (part in s.split(';')) {
-                      val f = part.split('|')
-                      if (f.size != 5) continue
-                      val g = f[0].toFloatOrNull(); val w = f[1].toFloatOrNull(); val p = f[2].toFloatOrNull()
-                      val e = f[3].toFloatOrNull(); val o = f[4].toIntOrNull()
-                      if (g == null || w == null || p == null || e == null || o == null) continue
-                      out.add(Rec(g, w, p, e, o))
-                  }
-                  return out
-              }
-
-              private fun save(c: Context, list: List<Rec>) {
-                  val s = list.joinToString(";") { String.format(Locale.US, "%.1f|%.1f|%.1f|%.1f|%d", it.gap, it.w, it.plan, it.err, it.outcome) }
-                  Prefs.of(c).edit().putString(KEY, s).apply()
-              }
-
-              fun add(c: Context, r: Rec) {
-                  val list = load(c)
-                  list.add(r)
-                  while (list.size > MAX) list.removeAt(0)
-                  save(c, list)
-              }
-
-              fun clear(c: Context) { Prefs.of(c).edit().remove(KEY).apply() }
-
-              /**
-               * The next offset (px, + long, - short) to aim at on this bridge, or null when it has been tested enough.
-               * Offsets close to the dot come first, and once a Game Over has happened on one side, nothing further out on that side is tried.
-               */
-              fun nextOffset(zone: List<Rec>, gap: Float, w: Float): Float? {
-                  val h = w / 2f
-                  val done = zone.filter { abs(it.gap - gap) <= 2f && abs(it.w - w) <= 2f }
-                  val goLong = done.filter { it.outcome == 2 && it.plan > 0f }.minOfOrNull { it.plan }
-                  val goShort = done.filter { it.outcome == 2 && it.plan < 0f }.maxOfOrNull { it.plan }
-                  for (f in floatArrayOf(0.25f, -0.25f, 0.5f, -0.5f, 0.75f, -0.75f, 1.0f, -1.0f)) {
-                      val p = Math.round(f * h * 2f) / 2f
-                      if (abs(p) < 2f) continue
-                      if (done.any { abs(it.plan - p) <= 1.5f }) continue
-                      if (p > 0f && goLong != null && p >= goLong) continue
-                      if (p < 0f && goShort != null && p <= goShort) continue
-                      return p
-                  }
-                  return null
-              }
-          }
-
-          /** One bridge as a bar: the platform's safe window (-w/2 .. +w/2 around the dot) and one marker for every test round. */
-          class ZoneBar(c: Context, private val half: Float, private val recs: List<ZoneBook.Rec>) : View(c) {
-              private val p = Paint(Paint.ANTI_ALIAS_FLAG)
-              private val d = resources.displayMetrics.density
-
-              override fun onDraw(cv: Canvas) {
-                  val w = width.toFloat(); val h = height.toFloat()
-                  val pad = 16f * d
-                  val span = max(half * 1.4f, 5f)
-                  fun x(v: Float) = pad + (v.coerceIn(-span, span) + span) / (2f * span) * (w - 2f * pad)
-                  val cy = h / 2f
-                  p.style = Paint.Style.FILL
-                  p.color = Ui.mix(Ui.teal, Ui.card, 0.45f)
-                  cv.drawRect(x(-half), cy - 9f * d, x(half), cy + 9f * d, p)           // the platform = the safe window
-                  p.color = Color.WHITE
-                  cv.drawRect(x(0f) - d, cy - 14f * d, x(0f) + d, cy + 14f * d, p)      // the dot
-                  for (r in recs) {
-                      p.color = when (r.outcome) { 0 -> Color.rgb(255, 200, 60); 2 -> Ui.red; else -> Ui.green }
-                      cv.drawCircle(x(r.err), cy, 6f * d, p)
-                  }
-              }
-          }
-          BH_EOF
-          mkdir -p "$(dirname app/src/main/java/com/example/bridgehelper/ZoneTestActivity.kt)"
-          cat > app/src/main/java/com/example/bridgehelper/ZoneTestActivity.kt <<'BH_EOF'
-          package com.example.bridgehelper
-
-          import android.app.Activity
-          import android.os.Bundle
-          import android.view.Gravity
-          import android.view.ViewGroup.LayoutParams.MATCH_PARENT
-          import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
-          import android.widget.LinearLayout
-          import kotlin.math.abs
-
-          class ZoneTestActivity : Activity() {
-              private var confirm = false
-
-              private fun sg(v: Float): String = (if (v >= 0f) "+" else "") + Math.round(v)
-
-              override fun onCreate(b: Bundle?) {
-                  super.onCreate(b)
-                  val col = buildScreen("Safe-zone test", true)
-                  col.addView(label("Each card is one common bridge. The bar is the platform: its two ends are the limits of the safe window and the white line is the dot. Every circle is one test round, placed where the bridge really ended: gold = Perfect, green = landed, red = Game Over.", 13f, Ui.muted)
-                      .apply { setPadding(0, 0, 0, dp(14)) })
-
-                  val recs = ZoneBook.load(this)
-                  if (recs.isEmpty()) {
-                      val c = card()
-                      c.addView(label("No results yet. Switch on Safe-zone test in Bridge Mode, Auto tab, and play. Only the most common bridges are tested, and a Game Over ends your attempt, so each bridge costs at most two (one long, one short).", 14f))
-                      col.addView(c)
-                  }
-                  val groups = ArrayList<Triple<Float, Float, MutableList<ZoneBook.Rec>>>()
-                  for (r in recs) {
-                      val g = groups.firstOrNull { abs(it.first - r.gap) <= 2f && abs(it.second - r.w) <= 2f }
-                      if (g != null) g.third.add(r) else groups.add(Triple(r.gap, r.w, mutableListOf(r)))
-                  }
-                  groups.sortByDescending { it.third.size }
-                  for ((gap, w, list) in groups) col.addView(bridgeCard(gap, w, list))
-
-                  if (recs.isNotEmpty()) {
-                      val btn = bigButton("Clear test results", Ui.red, 16f, 56) { }
-                      btn.setOnClickListener {
-                          if (!confirm) { confirm = true; btn.text = "Tap again to clear everything" }
-                          else { ZoneBook.clear(this); recreate() }
-                      }
-                      col.addView(btn)
-                  }
-              }
-
-              private fun bridgeCard(gap: Float, w: Float, list: List<ZoneBook.Rec>): LinearLayout {
-                  val c = card()
-                  val head = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
-                  head.addView(label("gap " + gap.toInt() + " px   \u00b7   width " + w.toInt() + " px", 16f, bold = true), LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
-                  head.addView(chip(list.size.toString() + " tests", Ui.blue))
-                  c.addView(head)
-                  c.addView(ZoneBar(this, w / 2f, list), LinearLayout.LayoutParams(MATCH_PARENT, dp(46)))
-
-                  val safe = list.filter { it.outcome != 2 }
-                  val okLong = safe.filter { it.err > 0f }.maxOfOrNull { it.err }
-                  val okShort = safe.filter { it.err < 0f }.minOfOrNull { it.err }
-                  val goLong = list.filter { it.outcome == 2 && it.err > 0f }.minOfOrNull { it.err }
-                  val goShort = list.filter { it.outcome == 2 && it.err < 0f }.maxOfOrNull { it.err }
-                  val perfect = list.filter { it.outcome == 0 }
-
-                  c.addView(label("Theory: safe up to +-" + Math.round(w / 2f) + " px from the dot", 12f, Ui.muted).apply { setPadding(0, dp(4), 0, 0) })
-                  if (okShort != null || okLong != null)
-                      c.addView(label("Landed safely from " + sg(okShort ?: 0f) + " to " + sg(okLong ?: 0f) + " px", 14f).apply { setPadding(0, dp(4), 0, 0) })
-                  if (goLong != null) c.addView(label("Game Over when long, from " + sg(goLong) + " px", 14f, Ui.red).apply { setPadding(0, dp(2), 0, 0) })
-                  if (goShort != null) c.addView(label("Game Over when short, from " + sg(goShort) + " px", 14f, Ui.red).apply { setPadding(0, dp(2), 0, 0) })
-                  if (perfect.isNotEmpty())
-                      c.addView(label("Perfect between " + sg(perfect.minOf { it.err }) + " and " + sg(perfect.maxOf { it.err }) + " px", 14f).apply { setPadding(0, dp(2), 0, 0) })
-
-                  val sorted = list.sortedBy { it.plan }
-                  val txt = sorted.joinToString("   \u00b7   ") {
-                      sg(it.plan) + " \u2192 " + (when (it.outcome) { 0 -> "Perfect"; 2 -> "GAME OVER"; else -> "landed" }) + " (" + sg(it.err) + ")"
-                  }
-                  c.addView(label("Aimed at \u2192 result (where it ended):\n" + txt, 12f, Ui.muted).apply { setPadding(0, dp(6), 0, 0) })
-                  return c
-              }
           }
           BH_EOF
           mkdir -p "$(dirname app/src/main/res/drawable/ic_gear.xml)"
