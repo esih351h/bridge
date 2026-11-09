@@ -821,9 +821,16 @@ jobs:
                       return if (n == 0) 0f else hit.toFloat() / n
                   }
 
-                  // 1) bright gold buttons in the middle column: Daily Skip + Fight (anywhere vertically) or the reward OK
-                  val bx0 = (0.44f * W).toInt(); val bx1 = (0.565f * W).toInt(); val strip = bx1 - bx0
-                  val ya = (0.18f * H).toInt(); val yb = (0.98f * H).toInt()
+                  
+// 1) Detect gold buttons in the middle column.
+// Stop the scan below the Fight button so Weekly Tower's
+// red platform glow cannot merge with the button.
+val bx0 = (0.44f * W).toInt()
+val bx1 = (0.565f * W).toInt()
+val strip = bx1 - bx0
+
+val ya = (0.18f * H).toInt()
+val yb = (0.94f * H).toInt()
                   val cnt = IntArray(H)
                   for (y in ya until yb) { var c = 0; for (x in bx0 until bx1) if (gold(x, y)) c++; cnt[y] = c }
                   val blobs = mutableListOf<Blob>()
