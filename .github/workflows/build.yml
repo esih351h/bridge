@@ -821,11 +821,8 @@ jobs:
                       return if (n == 0) 0f else hit.toFloat() / n
                   }
 
-                  
-// 1) Detect gold buttons in the middle column.
-// Stop the scan below the Fight button so Weekly Tower's
-// red platform glow cannot merge with the button.
-val bx0 = (0.44f * W).toInt()
+                  // 1) bright gold buttons in the middle column: Daily Skip + Fight (anywhere vertically) or the reward OK
+                  val bx0 = (0.44f * W).toInt()
 val bx1 = (0.565f * W).toInt()
 val strip = bx1 - bx0
 
