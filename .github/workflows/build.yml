@@ -9,7 +9,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Version
-        run: echo "build.yml version 3.0 - fully automatic bridge, distance-to-dot book, Perfect hold is the target, book recorded always, convert old book, no safe-zone test"
+        run: echo "build.yml version 3.1 - Tower Fight button also found on the Weekly Tower (hue based button colour)"
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -46,8 +46,8 @@ jobs:
                   applicationId = "com.example.bridgehelper"
                   minSdk = 26
                   targetSdk = 34
-                  versionCode = 7
-                  versionName = "3.0"
+                  versionCode = 8
+                  versionName = "3.1"
               }
               // The same key for every build: Android then lets a new build update the installed app and keep its data.
               signingConfigs {
@@ -802,6 +802,20 @@ jobs:
                       val r = px(x, y, if (swap) 2 else 0); val g = px(x, y, 1); val b = px(x, y, if (swap) 0 else 2)
                       return r >= 150 && g in 85..215 && b <= 115 && r > g + 25
                   }
+                  // The gold of the buttons: an orange-yellow hue (about 28 to 50 degrees), strongly saturated and bright. The glow behind
+                  // the buttons on other towers is red-orange (about 13 degrees) or pale, and the walls are darker, so they do not match.
+                  fun button(x: Int, y: Int): Boolean {
+                      val r = px(x, y, if (swap) 2 else 0); val g = px(x, y, 1); val b = px(x, y, if (swap) 0 else 2)
+                      val d = r - b
+                      return r >= 140 && r >= g && g >= b && 100 * d >= 45 * r && 15 * (g - b) >= 7 * d && 6 * (g - b) <= 5 * d
+                  }
+                  fun buttonFrac(fx0: Float, fy0: Float, fx1: Float, fy1: Float): Float {
+                      val x0 = (fx0 * W).toInt(); val x1 = min(W, (fx1 * W).toInt())
+                      val y0 = (fy0 * H).toInt(); val y1 = min(H, (fy1 * H).toInt())
+                      var hit = 0; var n = 0
+                      for (y in y0 until y1) for (x in x0 until x1) { n++; if (button(x, y)) hit++ }
+                      return if (n == 0) 0f else hit.toFloat() / n
+                  }
                   // share of pixels in a box (fractions of the screen) that are gold
                   fun goldFrac(fx0: Float, fy0: Float, fx1: Float, fy1: Float): Float {
                       val x0 = (fx0 * W).toInt(); val x1 = min(W, (fx1 * W).toInt())
@@ -823,9 +837,9 @@ jobs:
 
                   // 1) bright gold buttons in the middle column: Daily Skip + Fight (anywhere vertically) or the reward OK
                   val bx0 = (0.44f * W).toInt(); val bx1 = (0.565f * W).toInt(); val strip = bx1 - bx0
-                  val ya = (0.18f * H).toInt(); val yb = (0.94f * H).toInt()
+                  val ya = (0.18f * H).toInt(); val yb = (0.98f * H).toInt()
                   val cnt = IntArray(H)
-                  for (y in ya until yb) { var c = 0; for (x in bx0 until bx1) if (gold(x, y)) c++; cnt[y] = c }
+                  for (y in ya until yb) { var c = 0; for (x in bx0 until bx1) if (button(x, y)) c++; cnt[y] = c }
                   val blobs = mutableListOf<Blob>()
                   var run0 = -1; var run1 = -1; var gapRows = 0
                   fun closeRun() {
@@ -833,7 +847,7 @@ jobs:
                       val hh = (run1 - run0 + 1).toFloat() / H
                       if (hh >= 0.045f && hh <= 0.08f) {
                           var sx = 0L; var n = 0; var mnx = W; var mxx = 0
-                          for (y in run0..run1) for (x in bx0 until bx1) if (gold(x, y)) { sx += x; n++; mnx = min(mnx, x); mxx = max(mxx, x) }
+                          for (y in run0..run1) for (x in bx0 until bx1) if (button(x, y)) { sx += x; n++; mnx = min(mnx, x); mxx = max(mxx, x) }
                           if (n > 0) {
                               val w = (mxx - mnx + 1).toFloat() / W
                               val fill = n.toFloat() / ((run1 - run0 + 1) * (mxx - mnx + 1))
@@ -863,7 +877,8 @@ jobs:
                   // 2) battle: Skip icon with Pause above it and the dark bar on top
                   val skip = goldFrac(0.939f, 0.465f, 0.969f, 0.528f)
                   val pause = goldFrac(0.939f, 0.300f, 0.969f, 0.363f)
-                  if (cls == 0 && skip >= 0.08f && pause >= 0.06f && darkFrac(0.438f, 0.010f, 0.610f, 0.087f) >= 0.6f) {
+                  if (cls == 0 && skip >= 0.08f && pause >= 0.06f && buttonFrac(0.939f, 0.465f, 0.969f, 0.528f) >= 0.05f &&
+                      buttonFrac(0.939f, 0.300f, 0.969f, 0.363f) >= 0.05f && darkFrac(0.438f, 0.010f, 0.610f, 0.087f) >= 0.6f) {
                       cls = 2; tTx = 0.954f; tTy = 0.509f
                   }
                   val now = SystemClock.elapsedRealtime()
