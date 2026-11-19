@@ -9,7 +9,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Version
-        run: echo "build.yml version 3.1 - Tower Fight button also found on the Weekly Tower (hue based button colour)"
+        run: echo "build.yml version 3.2 - run trace, follow the recent rounds, learned values shown not edited, simpler bridge settings"
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -46,8 +46,8 @@ jobs:
                   applicationId = "com.example.bridgehelper"
                   minSdk = 26
                   targetSdk = 34
-                  versionCode = 8
-                  versionName = "3.1"
+                  versionCode = 9
+                  versionName = "3.2"
               }
               // The same key for every build: Android then lets a new build update the installed app and keep its data.
               signingConfigs {
@@ -93,6 +93,7 @@ jobs:
                   <activity android:name=".RequirementsActivity" android:exported="false" />
                   <activity android:name=".ThemesActivity" android:exported="false" />
                   <activity android:name=".PerfectBookActivity" android:exported="false" />
+                  <activity android:name=".RunTraceActivity" android:exported="false" />
                   <activity android:name=".EventLogActivity" android:exported="false" />
                   <activity android:name=".BackupActivity" android:exported="false" />
                   <service android:name=".OverlayService" android:exported="false"
@@ -247,17 +248,30 @@ jobs:
 
           import android.app.Activity
           import android.content.Intent
+          import android.graphics.Color
+          import android.graphics.Typeface
           import android.os.Bundle
+          import android.view.Gravity
+          import android.view.ViewGroup.LayoutParams.MATCH_PARENT
+          import android.view.ViewGroup.LayoutParams.WRAP_CONTENT
           import android.widget.EditText
           import android.widget.LinearLayout
           import android.widget.Switch
+          import android.widget.TextView
           import android.widget.Toast
 
           class BridgeSettingsActivity : Activity() {
               private val fields = LinkedHashMap<String, EditText>()
-              private lateinit var timedSw: Switch
-              private lateinit var watchSw: Switch
               private lateinit var perfSw: Switch
+              private lateinit var driftSw: Switch
+              private lateinit var learnSw: Switch
+              private lateinit var traceSw: Switch
+              private lateinit var tabTimed: TextView
+              private lateinit var tabWatch: TextView
+              private lateinit var methodDesc: TextView
+              private lateinit var learnedText: TextView
+              private lateinit var traceBtn: TextView
+              private var method = "timed"                       // "timed" = fixed-length hold, "watch" = hold and watch
 
               private fun addFields(col: LinearLayout, keys: List<String>) {
                   val p = Prefs.of(this)
@@ -269,43 +283,107 @@ jobs:
                   }
               }
 
+              private fun tab(text: String, key: String): TextView = TextView(this).apply {
+                  this.text = text; textSize = 15f; setTextColor(Color.WHITE); typeface = Typeface.DEFAULT_BOLD
+                  gravity = Gravity.CENTER; isClickable = true
+                  setOnClickListener { method = key; styleMethod() }
+              }
+
+              private fun styleMethod() {
+                  tabTimed.background = rounded(if (method == "timed") Ui.blue else Ui.card, 14)
+                  tabWatch.background = rounded(if (method == "watch") Ui.blue else Ui.card, 14)
+                  methodDesc.text = if (method == "timed")
+                      "Presses for a calculated time and lets the system lift the finger. The time comes from the book and the learned timing."
+                  else
+                      "Keeps the finger down and watches the pole, which goes up and down while held. Far targets: lets go on the way up at the right height. Close targets: lets the pole pass and lets go on the way down. It measures the actual pole every round. If the hold does not register it falls back to fixed-length."
+              }
+
+              private fun refreshLearned() {
+                  val p = Prefs.of(this)
+                  val sb = StringBuilder()
+                  for (l in Prefs.LEARNED) {
+                      val v = p.getFloat(l.key, l.def)
+                      sb.append(l.name).append(": ").append(Math.round(v)).append(' ').append(l.unit).append('\n')
+                  }
+                  sb.append("Rounds in the trace: ").append(RunTrace.load(this).size)
+                  learnedText.text = sb.toString().trimEnd()
+                  traceBtn.text = "Run trace (" + RunTrace.load(this).size + " rounds)"
+              }
+
               override fun onCreate(b: Bundle?) {
                   super.onCreate(b)
                   val p = Prefs.of(this)
                   val col = buildScreen("Bridge Mode", true)
-                  col.addView(label("Fully automatic. The pole has to reach the blue dot on the next platform: the distance from the pole's base, the edge of your platform, to that dot. The platform's width only decides whether a bridge reaches the platform or goes over it.", 13f, Ui.muted)
+                  col.addView(label("Fully automatic. The pole has to reach the blue dot on the next platform: the distance from the pole's base, the edge of your platform, to that dot. The platform's width only decides whether a bridge reaches the platform or goes over it. Timing the app works out by itself is shown here, not set by hand.", 13f, Ui.muted)
                       .apply { setPadding(0, 0, 0, dp(14)) })
 
+                  // ---- hold method ----
                   col.addView(sectionTitle("HOLD METHOD"))
-                  val (c1, s1) = switchField("Hold and watch",
-                      "Keeps the finger down and watches the pole, which goes up and down while held. Far targets: lets go on the way up at the right height. Close targets: lets the pole pass and lets go on the way down. Replaces the fixed-length hold while it is on; if the hold does not register it falls back to fixed-length.",
-                      p.getBoolean("holdWatch", false))
-                  watchSw = s1; col.addView(c1)
-                  val (c2, s2) = switchField("Fixed-length hold",
-                      "Presses for a calculated time and lets the system lift the finger. Most accurate when Hold and watch is off.",
-                      p.getBoolean("timedAlways", true))
-                  timedSw = s2; col.addView(c2)
+                  method = if (p.getBoolean("holdWatch", false)) "watch" else "timed"
+                  tabTimed = tab("Fixed-length", "timed"); tabWatch = tab("Hold and watch", "watch")
+                  val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+                  row.addView(tabTimed, LinearLayout.LayoutParams(0, dp(48), 1f).apply { rightMargin = dp(4) })
+                  row.addView(tabWatch, LinearLayout.LayoutParams(0, dp(48), 1f).apply { leftMargin = dp(4) })
+                  col.addView(row, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT).apply { bottomMargin = dp(8) })
+                  methodDesc = label("", 12f, Ui.muted).apply { setPadding(dp(4), 0, dp(4), dp(10)) }
+                  col.addView(methodDesc)
+                  styleMethod()
                   addFields(col, listOf("hwNear"))
 
-                  col.addView(sectionTitle("TIMING"))
-                  addFields(col, listOf("holdWait", "lead", "timedAdj", "rateEst", "aim"))
-
-                  col.addView(sectionTitle("PRESS POSITION"))
-                  addFields(col, listOf("pressX", "pressY"))
-
+                  // ---- book ----
                   col.addView(sectionTitle("BOOK"))
-                  val (c3, s3) = switchField("Use the book for holds",
-                      "On: before each hold the app uses what the book learned for this distance. Off: it uses the timing model only. Every round is recorded either way. A tag beside the anchor shows what usually happened at this distance: Perfect, Record (landed, no bonus), Game Over, or New.",
+                  val (c1, s1) = switchField("Use the book for holds",
+                      "On: before each hold the app uses what the book learned for this distance. Off: it uses the learned timing only. Every round is recorded either way. A tag beside the anchor shows what usually happened at this distance: Perfect, Record (landed, no bonus), Game Over, or New.",
                       p.getBoolean("perfMem", true))
-                  perfSw = s3; col.addView(c3)
-                  addFields(col, listOf("pmTol"))
+                  perfSw = s1; col.addView(c1)
                   col.addView(bigButton("Perfect book (" + PerfBook.load(this).size + ")", Ui.purple, 16f, 56) {
                       startActivity(Intent(this, PerfectBookActivity::class.java))
                   })
 
-                  col.addView(bigButton("Reset to default", Ui.orange, 16f, 56) { reset() })
+                  // ---- follow the recent rounds ----
+                  col.addView(sectionTitle("RUNS THAT DRIFT"))
+                  val (c2, s2) = switchField("Follow the recent rounds",
+                      "After 4 rounds in an attempt, shifts every fixed-length hold by most of the typical miss of the last rounds (at most 40 ms), and starts again at each new attempt. It is for runs that slowly end up long or short. If your bridges are fine it does nothing.",
+                      p.getBoolean("drift", true))
+                  driftSw = s2; col.addView(c2)
+
+                  // ---- learning ----
+                  col.addView(sectionTitle("LEARNED BY THE APP"))
+                  val (c3, s3) = switchField("Learn timing automatically",
+                      "Pole speed, hold adjust and reaction lead are corrected after every round. Switch it off to freeze them, for example to test something.",
+                      p.getBoolean("learn", true))
+                  learnSw = s3; col.addView(c3)
+                  val lc = card()
+                  lc.addView(label("Learned so far", 14f, Ui.muted))
+                  learnedText = label("", 15f).apply { setPadding(0, dp(4), 0, 0) }
+                  lc.addView(learnedText)
+                  col.addView(lc)
+                  col.addView(bigButton("Reset the learned values", Ui.orange, 16f, 56) {
+                      Prefs.resetLearned(this); refreshLearned()
+                      Toast.makeText(this, "Learned values are back to the starting values", Toast.LENGTH_SHORT).show()
+                  })
+
+                  // ---- run trace ----
+                  col.addView(sectionTitle("RUN TRACE"))
+                  val (c4, s4) = switchField("Record every round",
+                      "Writes down every round with the distance, hold, miss, phone temperature and load, and the learned timing, so a problem such as runs ending after round 20 can be found. Costs almost nothing.",
+                      p.getBoolean("trace", true))
+                  traceSw = s4; col.addView(c4)
+                  traceBtn = bigButton("Run trace", Ui.blue, 16f, 56) { startActivity(Intent(this, RunTraceActivity::class.java)) }
+                  col.addView(traceBtn)
+
+                  // ---- timing and press position ----
+                  col.addView(sectionTitle("TIMING"))
+                  addFields(col, listOf("holdWait"))
+                  col.addView(sectionTitle("PRESS POSITION"))
+                  addFields(col, listOf("pressX", "pressY"))
+
+                  col.addView(bigButton("Reset these settings", Ui.orange, 16f, 56) { reset() })
                   col.addView(bigButton("Save", Ui.green, 16f, 56) { save(); Toast.makeText(this, "Saved", Toast.LENGTH_SHORT).show() })
+                  refreshLearned()
               }
+
+              override fun onResume() { super.onResume(); refreshLearned() }
 
               private fun save() {
                   val e = Prefs.of(this).edit()
@@ -315,15 +393,17 @@ jobs:
                       if (o.key == "holdWait") v = v.coerceIn(0f, 60f)
                       e.putFloat(o.key, v)
                   }
-                  e.putBoolean("holdWatch", watchSw.isChecked).putBoolean("timedAlways", timedSw.isChecked)
-                      .putBoolean("perfMem", perfSw.isChecked).apply()
+                  e.putBoolean("holdWatch", method == "watch").putBoolean("timedAlways", true)
+                      .putBoolean("perfMem", perfSw.isChecked).putBoolean("drift", driftSw.isChecked)
+                      .putBoolean("learn", learnSw.isChecked).putBoolean("trace", traceSw.isChecked).apply()
               }
 
               private fun reset() {
                   Prefs.resetBridge(this)
                   for (o in Prefs.BRIDGE) fields[o.key]?.setText(Prefs.fmt(o.def))
-                  timedSw.isChecked = true; watchSw.isChecked = false; perfSw.isChecked = true
-                  Toast.makeText(this, "Bridge Mode is back to default", Toast.LENGTH_SHORT).show()
+                  method = "timed"; styleMethod()
+                  perfSw.isChecked = true; driftSw.isChecked = true; learnSw.isChecked = true; traceSw.isChecked = true
+                  Toast.makeText(this, "Bridge settings are back to default", Toast.LENGTH_SHORT).show()
               }
 
               override fun onPause() { super.onPause(); save() }
@@ -538,6 +618,7 @@ jobs:
           import android.app.*
           import android.content.Context
           import android.content.Intent
+          import android.content.IntentFilter
           import android.content.pm.ServiceInfo
           import android.content.res.Configuration
           import android.graphics.*
@@ -618,6 +699,13 @@ jobs:
               private var usedSug: PerfBook.Suggest? = null; private var usedHow = ""
               private var perfectWatch = false; private var perfectSeen = false
               private var bookSize = 0
+              // run trace, drift correction, learning switch
+              private var traceOn = true; private var driftOn = true; private var learnOn = true
+              private var attemptNo = 0
+              private val recentErr = ArrayList<Float>()                  // how far (px) bridges of this attempt ended from the dot, without the drift correction
+              private var pressDrift = 0f                                  // ms the drift correction added to this round's hold
+              private var traceFirstMs = -1L; private var traceFirstH = 0f // when, and how tall, the pole first showed after we pressed
+              private var procMs = 0f; private var fpsEma = 0f; private var lastImgTs = 0L; private var frameAgeMs = -1f
               private var roundNo = 0                      // rounds played since Start or the last Game Over
               private var rejectRun = 0                    // odd rounds in a row that the timing model ignored
               private var bookCache: List<PerfBook.Entry> = emptyList(); private var bookAt = 0L
@@ -705,6 +793,8 @@ jobs:
                   pmTol = prefs.getFloat("pmTol", 3f).coerceIn(0.5f, 10f)
                   bookSize = PerfBook.load(this).size
                   holdWatch = prefs.getBoolean("holdWatch", false)
+                  traceOn = prefs.getBoolean("trace", true); driftOn = prefs.getBoolean("drift", true); learnOn = prefs.getBoolean("learn", true)
+                  attemptNo = prefs.getInt("attemptSeq", 0)
                   hwNear = prefs.getFloat("hwNear", 100f).coerceIn(30f, 200f)
                   tFightWait = prefs.getFloat("tFightWait", 2500f).toLong(); tSkipWait = prefs.getFloat("tSkipWait", 2500f).toLong()
                   tOkWait = prefs.getFloat("tOkWait", 1500f).toLong(); tStuck = prefs.getFloat("tStuck", 3f).toInt().coerceAtLeast(1)
@@ -783,7 +873,20 @@ jobs:
                   r.setOnImageAvailableListener({ rd ->
                       val img = rd.acquireLatestImage()
                       if (img != null) {
-                          try { frames++; analyze(img) }
+                          try {
+                              frames++
+                              val t0 = System.nanoTime()
+                              if (lastImgTs > 0L) {
+                                  val f = 1e9f / (img.timestamp - lastImgTs).coerceAtLeast(1L)
+                                  fpsEma = if (fpsEma == 0f) f else fpsEma * 0.95f + f.coerceIn(1f, 120f) * 0.05f
+                              }
+                              lastImgTs = img.timestamp
+                              val age = (SystemClock.elapsedRealtimeNanos() - img.timestamp) / 1e6f
+                              frameAgeMs = if (age in 0f..2000f) age else -1f
+                              analyze(img)
+                              val dt = (System.nanoTime() - t0) / 1e6f
+                              procMs = if (procMs == 0f) dt else procMs * 0.95f + dt * 0.05f
+                          }
                           catch (e: Exception) { publish(GuideState(false, debug = "error: ${e.javaClass.simpleName} ${e.message}")) }
                           finally { img.close() }
                       }
@@ -1158,6 +1261,7 @@ jobs:
                           fGap = m[0]; fPw = m[1]; fBase = mBase; fTop = mTop; fW = W; fAim = aimNow
                           fSy = sy; fSy2 = sy2
                           maxLen = len; lastGrowTs = ts; holdStartTs = ts
+                          if (autoActive) { traceFirstMs = SystemClock.elapsedRealtime() - pressedAtMs; traceFirstH = len }
                           hold(ts, len); return
                       }
                   } else { arm = 0; armPrev = 0f }
@@ -1233,6 +1337,7 @@ jobs:
                */
               private fun finishLanding(W: Int) {
                   val tip = bridgeTipMax; bridgeTipMax = -1
+                  if (!learnOn) return                              // "Learn timing automatically" is off
                   if (watchRound) { finishWatch(tip, W); return }
                   if (tip < 0 || !pressTimed || pressDur <= 0L) return
                   val lObs = tip - pressBase - W * 0.004f      // same reference point as the aim
@@ -1277,16 +1382,27 @@ jobs:
                   val haveL = lObs >= 15f && abs(lObs - pressAim) <= 80f
                   val err = if (haveL) lObs - pressAim else 0f
                   val outcome = if (perfectSeen) 0 else if (gameOverSeen) 2 else 1
+                  // the hold and the miss as they would have been without the drift correction (the book stores those)
+                  val holdBase = if (pressTimed) pressDur.toFloat() - pressDrift else -1f
+                  val errBase = if (haveL && pressTimed) err - pressDrift * rateEst / 1000f else err
+                  if (haveL && pressTimed && abs(errBase) <= 30f) { recentErr.add(errBase); while (recentErr.size > 7) recentErr.removeAt(0) }
                   // a "Perfect" whose hold is far from what the timing model says is probably a misread: do not let it into the book
-                  val odd = outcome == 0 && pressTimed && abs(pressDur - PerfBook.bookModel(bookNow(), pressAim, pressAim / rateEst * 1000f + timedAdjMs)) > 60f
+                  val odd = outcome == 0 && pressTimed && abs(pressDur - pressDrift - PerfBook.bookModel(bookNow(), pressAim, pressAim / rateEst * 1000f + timedAdjMs)) > 60f
                   var saved = false
                   if (!odd && (haveL || outcome == 0)) {                       // always recorded: the switch only decides whether the book is used for holds
-                      bookSize = PerfBook.record(this, pressAim, pressGap, pressPw, if (pressTimed) pressDur.toFloat() else -1f, err, outcome)
+                      bookSize = PerfBook.record(this, pressAim, pressGap, pressPw, holdBase, errBase, outcome)
                       saved = true
                   }
                   val sug = usedSug
                   if (sug != null) PerfBook.noteUse(this, sug, perfectSeen)
                   PerfBook.addStat(this, sug != null, perfectSeen)
+                  if (traceOn) {
+                      val bat = battery()
+                      val startMs = if (traceFirstMs >= 0L && traceFirstH > 0f) traceFirstMs - traceFirstH / rateEst * 1000f else -1f
+                      RunTrace.add(this, RunTrace.Rec(System.currentTimeMillis(), attemptNo, roundNo, pressAim, pressGap, pressPw,
+                          if (pressTimed) "T" else "W", if (pressTimed) pressDur.toFloat() else 0f, if (haveL) err else 0f, outcome, if (sug != null) 1 else 0,
+                          bat[0], bat[1].toInt(), bat[2].toInt(), procMs, fpsEma, frameAgeMs, startMs, rateEst, timedAdjMs, leadMs, pressDrift))
+                  }
                   bookAt = 0L
                   val off = err.toInt()
                   val side = if (haveL) " (" + abs(off) + " px " + (if (off > 0) "long" else "short") + " of the dot)" else ""
@@ -1301,7 +1417,26 @@ jobs:
                   val line = "#" + roundNo + " " + res + " | " + src + " | " + how + " | distance " + pressAim.toInt() + " px" + (if (odd) " | NOT saved: hold far from the timing model" else if (saved) " | saved" else "")
                   EventLog.add(this, line)
                   status(line, true)
-                  if (outcome == 2) roundNo = 0
+                  if (outcome == 2) { roundNo = 0; recentErr.clear() }
+              }
+
+              /** Hold correction (ms) from the last rounds of this attempt: the middle value of how far they ended from the dot, mostly cancelled (nothing for shifts under 2.5 px). */
+              private fun driftMs(): Float {
+                  if (recentErr.size < 4) return 0f
+                  val s = recentErr.sorted()
+                  val med = if (s.size % 2 == 1) s[s.size / 2] else (s[s.size / 2 - 1] + s[s.size / 2]) / 2f
+                  if (abs(med) < 2.5f) return 0f                              // tiny shifts are just tap noise: leave the holds alone
+                  return (-0.75f * med / rateEst * 1000f).coerceIn(-40f, 40f)
+              }
+
+              /** [battery temperature in C, battery %, thermal status (0 = fine ... 6 = emergency, -1 = unknown)] */
+              private fun battery(): FloatArray {
+                  val i = registerReceiver(null, IntentFilter(Intent.ACTION_BATTERY_CHANGED))
+                  val temp = (i?.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, 0) ?: 0) / 10f
+                  val lvl = i?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+                  var th = -1
+                  if (Build.VERSION.SDK_INT >= 29) th = (getSystemService(Context.POWER_SERVICE) as PowerManager).currentThermalStatus
+                  return floatArrayOf(temp, lvl.toFloat(), th.toFloat())
               }
 
               /** After a watched hold: if we let go too late the bridge is longer going up (shorter coming down); nudge the lead to cancel it. */
@@ -1413,7 +1548,10 @@ jobs:
                   val now = SystemClock.elapsedRealtime()
                   when (autoState) {
                       0 -> if (now >= readyAtMs && !autoActive && hist.size >= 3) {
-                          if (startAuto(aim, now)) { roundNo++; autoState = 1; pressGap = gap; pressPw = pw; pressBase = base }
+                          if (startAuto(aim, now)) {
+                              roundNo++
+                              if (roundNo == 1) { attemptNo++; getSharedPreferences("p", MODE_PRIVATE).edit().putInt("attemptSeq", attemptNo).apply() }
+                              autoState = 1; pressGap = gap; pressPw = pw; pressBase = base }
                       }
                       2 -> {
                           val changed = abs(gap - pressGap) > W * 0.025f || abs(pw - pressPw) > W * 0.025f || abs(base - pressBase) > W * 0.025f
@@ -1452,6 +1590,7 @@ jobs:
                   watchRound = holdWatch && !pressTimed
                   pressAim = aim
                   usedSug = null; usedHow = ""
+                  pressDrift = 0f; traceFirstMs = -1L
                   hwDir = 0; hwPending = 0; hwSawAbove = false; hwTarget = aim
                   pressedAtMs = now; autoToken = now; lastVisibleMs = now
                   val token = now
@@ -1461,6 +1600,11 @@ jobs:
                       if (perfMemOn) {
                           val sg = PerfBook.suggestDur(bookNow(), aim, pmTol, rateEst, prior)
                           if (sg != null) { dur = max(60L, sg.value.toLong()); usedSug = sg; usedHow = sg.how }
+                      }
+                      if (driftOn) {                                   // follow the recent rounds of this attempt
+                          val c = driftMs()
+                          pressDrift = c
+                          dur = max(60L, dur + c.toLong())
                       }
                       pressDur = dur
                       if (!svc.holdFor(x, y, dur)) { status("press was refused by Android", true); readyAtMs = now + 3000L; return false }
@@ -2025,15 +2169,18 @@ jobs:
               class Opt(val key: String, val title: String, val desc: String, val def: Float, val tab: String)
 
               val BRIDGE = listOf(
-                  Opt("lead", "Reaction lead (ms)", "Hold and watch only: how many ms before the pole reaches the target the finger is lifted, to cover the delay of reading the screen and of the tap. It adjusts itself after every release.", 100f, "general"),
-                  Opt("aim", "Aim point on the platform", "Used only when the blue dot is not found. 0 = near edge, 0.5 = middle, 1 = far edge.", 0.5f, "general"),
-                  Opt("rateEst", "Pole growth speed", "How fast the pole grows, in capture pixels per second. Learned automatically.", 334f, "general"),
                   Opt("holdWait", "Wait before each hold (seconds)", "After a new platform appears, wait this long before holding again. 0 = hold at once, up to 60. Counts down in the status line as hold in ...s.", 10f, "auto"),
-                  Opt("pmTol", "Perfect match tolerance (px)", "How close a stored Perfect must be, in distance to the dot, to be reused. About 3 is a good start.", 3f, "auto"),
                   Opt("hwNear", "Close-target limit (px)", "Hold and watch: below this distance to the dot the early rise is too hidden to measure, so it lets the pole pass and lets go on the way down. Above it, it lets go on the way up.", 100f, "auto"),
-                  Opt("timedAdj", "Hold time adjust (ms)", "+ if bridges come out short, - if too long. It learns by itself from where each bridge lands.", 12f, "auto"),
                   Opt("pressX", "Press position X (%)", "Where auto presses, as a percent from the left of the screen.", 52f, "auto"),
                   Opt("pressY", "Press position Y (%)", "Percent from the top. The default is the middle of the sky, below the reward bar.", 45f, "auto")
+              )
+
+              /** Timing the app works out by itself after every round. Shown, never edited: key, name, unit, default. */
+              class Learned(val key: String, val name: String, val unit: String, val def: Float)
+              val LEARNED = listOf(
+                  Learned("rateEst", "Pole speed", "px/s", 334f),
+                  Learned("timedAdj", "Hold adjust", "ms", 12f),
+                  Learned("lead", "Reaction lead (Hold and watch)", "ms", 100f)
               )
 
               val TOWER = listOf(
@@ -2045,10 +2192,17 @@ jobs:
 
               fun of(c: Context): SharedPreferences = c.getSharedPreferences("p", Context.MODE_PRIVATE)
 
+              fun resetLearned(c: Context) {
+                  val e = of(c).edit()
+                  LEARNED.forEach { e.remove(it.key) }
+                  e.apply()
+              }
+
               fun resetBridge(c: Context) {
                   val e = of(c).edit()
                   BRIDGE.forEach { e.remove(it.key) }
-                  e.remove("auto_bridge"); e.remove("timedAlways"); e.remove("perfMem"); e.remove("holdWatch"); e.apply()
+                  e.remove("auto_bridge"); e.remove("timedAlways"); e.remove("perfMem"); e.remove("holdWatch")
+                  e.remove("drift"); e.remove("learn"); e.remove("trace"); e.apply()
               }
 
               fun resetTower(c: Context) {
@@ -2166,6 +2320,178 @@ jobs:
 
                   row("Keep it from being turned off", "On Xiaomi / Poco phones, clearing recent apps turns accessibility services off. Open Recents, press and hold the OL Helper card and tap the lock icon. Installing an update also turns the service off, so switch it on again afterwards.",
                       null, false, null, null)
+              }
+          }
+          BH_EOF
+          mkdir -p "$(dirname app/src/main/java/com/example/bridgehelper/RunTrace.kt)"
+          cat > app/src/main/java/com/example/bridgehelper/RunTrace.kt <<'BH_EOF'
+          package com.example.bridgehelper
+
+          import android.content.Context
+          import java.text.SimpleDateFormat
+          import java.util.Date
+          import java.util.Locale
+
+          /** One line per auto round with everything that could explain why runs end: distance, hold, miss, phone heat and load, learned timing. */
+          object RunTrace {
+              class Rec(
+                  val t: Long, val attempt: Int, val round: Int,
+                  val dist: Float, val gap: Float, val w: Float,
+                  val method: String, val hold: Float, val miss: Float, val outcome: Int, val book: Int,
+                  val temp: Float, val battery: Int, val thermal: Int,
+                  val procMs: Float, val fps: Float, val ageMs: Float, val startMs: Float,
+                  val speed: Float, val adjust: Float, val lead: Float, val drift: Float
+              )
+
+              private const val KEY = "runTrace"
+              private const val MAX = 500
+
+              fun load(c: Context): MutableList<Rec> {
+                  val s = Prefs.of(c).getString(KEY, "") ?: ""
+                  val out = ArrayList<Rec>()
+                  for (part in s.split(';')) {
+                      val f = part.split('|')
+                      if (f.size != 22) continue
+                      try {
+                          out.add(Rec(f[0].toLong(), f[1].toInt(), f[2].toInt(), f[3].toFloat(), f[4].toFloat(), f[5].toFloat(),
+                              f[6], f[7].toFloat(), f[8].toFloat(), f[9].toInt(), f[10].toInt(),
+                              f[11].toFloat(), f[12].toInt(), f[13].toInt(),
+                              f[14].toFloat(), f[15].toFloat(), f[16].toFloat(), f[17].toFloat(),
+                              f[18].toFloat(), f[19].toFloat(), f[20].toFloat(), f[21].toFloat()))
+                      } catch (e: Exception) { }
+                  }
+                  return out
+              }
+
+              private fun line(r: Rec): String = String.format(Locale.US,
+                  "%d|%d|%d|%.1f|%.1f|%.1f|%s|%.0f|%.1f|%d|%d|%.1f|%d|%d|%.1f|%.1f|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f",
+                  r.t, r.attempt, r.round, r.dist, r.gap, r.w, r.method, r.hold, r.miss, r.outcome, r.book,
+                  r.temp, r.battery, r.thermal, r.procMs, r.fps, r.ageMs, r.startMs, r.speed, r.adjust, r.lead, r.drift)
+
+              fun add(c: Context, r: Rec) {
+                  val list = load(c)
+                  list.add(r)
+                  while (list.size > MAX) list.removeAt(0)
+                  Prefs.of(c).edit().putString(KEY, list.joinToString(";") { line(it) }).apply()
+              }
+
+              fun clear(c: Context) { Prefs.of(c).edit().remove(KEY).apply() }
+
+              /** The whole trace as a CSV file (opens in any spreadsheet). */
+              fun csv(c: Context): String {
+                  val fmt = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
+                  val sb = StringBuilder()
+                  sb.append("time,attempt,round,distance,gap,width,method,hold_ms,miss_px,result,book_used,temp_c,battery,thermal,proc_ms,fps,frame_age_ms,start_delay_ms,speed,adjust_ms,lead_ms,drift_ms\n")
+                  for (r in load(c)) {
+                      sb.append(fmt.format(Date(r.t))).append(',').append(r.attempt).append(',').append(r.round).append(',')
+                      sb.append(String.format(Locale.US, "%.1f,%.1f,%.1f,", r.dist, r.gap, r.w))
+                      sb.append(r.method).append(',')
+                      sb.append(String.format(Locale.US, "%.0f,%.1f,", r.hold, r.miss))
+                      sb.append(when (r.outcome) { 0 -> "Perfect"; 2 -> "GameOver"; else -> "Landed" }).append(',').append(r.book).append(',')
+                      sb.append(String.format(Locale.US, "%.1f,%d,%d,%.1f,%.1f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f\n",
+                          r.temp, r.battery, r.thermal, r.procMs, r.fps, r.ageMs, r.startMs, r.speed, r.adjust, r.lead, r.drift))
+                  }
+                  return sb.toString()
+              }
+          }
+          BH_EOF
+          mkdir -p "$(dirname app/src/main/java/com/example/bridgehelper/RunTraceActivity.kt)"
+          cat > app/src/main/java/com/example/bridgehelper/RunTraceActivity.kt <<'BH_EOF'
+          package com.example.bridgehelper
+
+          import android.app.Activity
+          import android.content.Intent
+          import android.os.Bundle
+          import android.widget.Toast
+          import kotlin.math.abs
+
+          class RunTraceActivity : Activity() {
+              private var confirm = false
+              private val reqExport = 21
+
+              private fun avg(v: List<Float>): Float = if (v.isEmpty()) 0f else v.sum() / v.size
+              private fun sg(v: Float): String = (if (v >= 0f) "+" else "") + String.format(java.util.Locale.US, "%.1f", v)
+
+              override fun onCreate(b: Bundle?) {
+                  super.onCreate(b)
+                  val col = buildScreen("Run trace", true)
+                  col.addView(label("Every auto round is written down with what could explain why runs end: the distance, the hold, how far off the bridge ended, the phone's temperature and load, and the timing the app had learned. Compare rounds 1 to 10 with 11 to 20 and 21 and up. Export the CSV to look at it in a spreadsheet or send it to me.", 13f, Ui.muted)
+                      .apply { setPadding(0, 0, 0, dp(14)) })
+
+                  val recs = RunTrace.load(this)
+                  if (recs.isEmpty()) {
+                      val c = card()
+                      c.addView(label("No rounds recorded yet. Switch on \"Record every round\" in Bridge Mode and play.", 15f))
+                      col.addView(c)
+                      return
+                  }
+
+                  // by position in the attempt
+                  col.addView(sectionTitle("BY ROUND IN THE ATTEMPT"))
+                  val buckets = listOf("Rounds 1 to 10" to (1..10), "Rounds 11 to 20" to (11..20), "Rounds 21 and up" to (21..999))
+                  for ((name, range) in buckets) {
+                      val rs = recs.filter { it.round in range }
+                      val c = card()
+                      c.addView(label(name + "   \u00b7   " + rs.size + " rounds", 16f, bold = true))
+                      if (rs.isEmpty()) { c.addView(label("Nothing yet.", 13f, Ui.muted)); col.addView(c); continue }
+                      val p = rs.count { it.outcome == 0 }; val g = rs.count { it.outcome == 2 }
+                      val misses = rs.filter { abs(it.miss) <= 40f }.map { it.miss }
+                      c.addView(label("Perfect " + p + " (" + (100 * p / rs.size) + "%)   \u00b7   Game Over " + g, 14f).apply { setPadding(0, dp(4), 0, 0) })
+                      c.addView(label("Average miss " + sg(avg(misses)) + " px (+ long, - short)   \u00b7   typical size " + String.format(java.util.Locale.US, "%.1f", avg(misses.map { abs(it) })) + " px", 13f, Ui.muted)
+                          .apply { setPadding(0, dp(2), 0, 0) })
+                      val temps = rs.map { it.temp }.filter { it > 0f }
+                      val starts = rs.map { it.startMs }.filter { it > 0f }
+                      val procs = rs.map { it.procMs }.filter { it > 0f }
+                      c.addView(label("Phone " + String.format(java.util.Locale.US, "%.1f", avg(temps)) + " \u00b0C   \u00b7   pole start delay " + Math.round(avg(starts)) + " ms   \u00b7   screen reading " +
+                          String.format(java.util.Locale.US, "%.1f", avg(procs)) + " ms", 13f, Ui.muted).apply { setPadding(0, dp(2), 0, 0) })
+                      col.addView(c)
+                  }
+
+                  // the last attempts
+                  col.addView(sectionTitle("THE LAST ATTEMPTS"))
+                  val byAttempt = recs.groupBy { it.attempt }.toSortedMap(compareByDescending<Int> { it })
+                  var shown = 0
+                  for ((n, rs) in byAttempt) {
+                      if (shown++ >= 8) break
+                      val last = rs.last()
+                      val end = when {
+                          last.outcome == 2 -> "Game Over, " + (if (last.miss > 0f) "went over the platform" else "did not reach the platform")
+                          else -> "still going or stopped"
+                      }
+                      val c = card()
+                      c.addView(label("Attempt " + n + "   \u00b7   " + rs.size + " rounds", 15f, bold = true))
+                      c.addView(label(end, 14f, if (last.outcome == 2) Ui.red else Ui.muted).apply { setPadding(0, dp(2), 0, 0) })
+                      val firstT = rs.first().temp; val lastT = last.temp
+                      val s1 = rs.take(5).map { it.startMs }.filter { it > 0f }; val s2 = rs.takeLast(5).map { it.startMs }.filter { it > 0f }
+                      c.addView(label("Phone " + String.format(java.util.Locale.US, "%.1f", firstT) + " \u2192 " + String.format(java.util.Locale.US, "%.1f", lastT) +
+                          " \u00b0C   \u00b7   pole start delay " + Math.round(avg(s1)) + " \u2192 " + Math.round(avg(s2)) + " ms", 13f, Ui.muted).apply { setPadding(0, dp(2), 0, 0) })
+                      col.addView(c)
+                  }
+
+                  col.addView(bigButton("Export the trace as a CSV file", Ui.green, 16f, 56) {
+                      val i = Intent(Intent.ACTION_CREATE_DOCUMENT).addCategory(Intent.CATEGORY_OPENABLE)
+                          .setType("text/csv").putExtra(Intent.EXTRA_TITLE, "ol-helper-trace.csv")
+                      startActivityForResult(i, reqExport)
+                  })
+                  val btn = bigButton("Clear the trace", Ui.red, 16f, 56) { }
+                  btn.setOnClickListener {
+                      if (!confirm) { confirm = true; btn.text = "Tap again to clear the trace" }
+                      else { RunTrace.clear(this); recreate() }
+                  }
+                  col.addView(btn)
+              }
+
+              @Deprecated("Deprecated in Java")
+              override fun onActivityResult(req: Int, res: Int, data: Intent?) {
+                  super.onActivityResult(req, res, data)
+                  val uri = data?.data
+                  if (req != reqExport || res != RESULT_OK || uri == null) return
+                  try {
+                      contentResolver.openOutputStream(uri)?.use { it.write(RunTrace.csv(this).toByteArray(Charsets.UTF_8)) }
+                      Toast.makeText(this, "Trace saved", Toast.LENGTH_LONG).show()
+                  } catch (e: Exception) {
+                      Toast.makeText(this, "Export failed: " + e.message, Toast.LENGTH_LONG).show()
+                  }
               }
           }
           BH_EOF
