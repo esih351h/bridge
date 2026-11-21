@@ -9,7 +9,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Version
-        run: echo "build.yml version 3.2 - run trace, follow the recent rounds, learned values shown not edited, simpler bridge settings"
+        run: echo "build.yml version 3.3 - pole speed by round number, steadier learning, hold and watch safety nets, optional overlay"
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -46,8 +46,8 @@ jobs:
                   applicationId = "com.example.bridgehelper"
                   minSdk = 26
                   targetSdk = 34
-                  versionCode = 9
-                  versionName = "3.2"
+                  versionCode = 10
+                  versionName = "3.3"
               }
               // The same key for every build: Android then lets a new build update the installed app and keep its data.
               signingConfigs {
@@ -266,6 +266,7 @@ jobs:
               private lateinit var driftSw: Switch
               private lateinit var learnSw: Switch
               private lateinit var traceSw: Switch
+              private lateinit var overlaySw: Switch
               private lateinit var tabTimed: TextView
               private lateinit var tabWatch: TextView
               private lateinit var methodDesc: TextView
@@ -363,6 +364,13 @@ jobs:
                       Toast.makeText(this, "Learned values are back to the starting values", Toast.LENGTH_SHORT).show()
                   })
 
+                  // ---- overlay ----
+                  col.addView(sectionTitle("OVERLAY"))
+                  val (c5, s5) = switchField("Show the overlay",
+                      "Auto reads the screen directly and does not need the overlay. It only draws the aim point, ruler and tag so you can see what the app sees. Switch it off to hide it completely. It takes effect the next time Bridge Mode is started.",
+                      p.getBoolean("overlay", true))
+                  overlaySw = s5; col.addView(c5)
+
                   // ---- run trace ----
                   col.addView(sectionTitle("RUN TRACE"))
                   val (c4, s4) = switchField("Record every round",
@@ -395,14 +403,15 @@ jobs:
                   }
                   e.putBoolean("holdWatch", method == "watch").putBoolean("timedAlways", true)
                       .putBoolean("perfMem", perfSw.isChecked).putBoolean("drift", driftSw.isChecked)
-                      .putBoolean("learn", learnSw.isChecked).putBoolean("trace", traceSw.isChecked).apply()
+                      .putBoolean("learn", learnSw.isChecked).putBoolean("trace", traceSw.isChecked)
+                      .putBoolean("overlay", overlaySw.isChecked).apply()
               }
 
               private fun reset() {
                   Prefs.resetBridge(this)
                   for (o in Prefs.BRIDGE) fields[o.key]?.setText(Prefs.fmt(o.def))
                   method = "timed"; styleMethod()
-                  perfSw.isChecked = true; driftSw.isChecked = true; learnSw.isChecked = true; traceSw.isChecked = true
+                  perfSw.isChecked = true; driftSw.isChecked = true; learnSw.isChecked = true; traceSw.isChecked = true; overlaySw.isChecked = true
                   Toast.makeText(this, "Bridge settings are back to default", Toast.LENGTH_SHORT).show()
               }
 
@@ -706,6 +715,15 @@ jobs:
               private var pressDrift = 0f                                  // ms the drift correction added to this round's hold
               private var traceFirstMs = -1L; private var traceFirstH = 0f // when, and how tall, the pole first showed after we pressed
               private var procMs = 0f; private var fpsEma = 0f; private var lastImgTs = 0L; private var frameAgeMs = -1f
+              // round-aware pole speed, calmer learning, watch safety nets
+              private val loopMs = 1550L                                   // one full up-and-down of the pole
+              private var badSinceMs = 0L; private var watchFails = 0
+              private var hwFixedDur = 0L; private var hwFallbackSet = false
+              private var lastHoldMs = 0L; private var settledRound = 0; private var pressFactor = 1f
+              private var roundSpeed = FloatArray(61) { 1f }               // pole speed in round n compared with the first rounds
+              private val wlog = StringBuilder()                           // what the last watched hold did, written to the activity log
+              private var hwPosted = false; private var lastGoodLen = 0f; private var lastGoodMs = 0L; private var lastGoodSpeed = 0f
+              private var showOverlay = true
               private var roundNo = 0                      // rounds played since Start or the last Game Over
               private var rejectRun = 0                    // odd rounds in a row that the timing model ignored
               private var bookCache: List<PerfBook.Entry> = emptyList(); private var bookAt = 0L
@@ -785,7 +803,7 @@ jobs:
                   autoEnabled = if (towerMode) prefs.getBoolean("auto_tower", true) else true
                   timedAlways = prefs.getBoolean("timedAlways", true)
                   rateEst = prefs.getFloat("rateEst", 334f)
-                  if (rateEst !in 280f..380f || timedAdjMs !in -50f..60f) {      // learned timing drifted somewhere unphysical: start again from the measured values
+                  if (rateEst !in 300f..365f || timedAdjMs !in -10f..40f) {      // learned timing drifted somewhere unphysical: start again from the measured values
                       rateEst = 334f; timedAdjMs = 12f
                       prefs.edit().putFloat("rateEst", rateEst).putFloat("timedAdj", timedAdjMs).apply()
                   }
@@ -793,6 +811,8 @@ jobs:
                   pmTol = prefs.getFloat("pmTol", 3f).coerceIn(0.5f, 10f)
                   bookSize = PerfBook.load(this).size
                   holdWatch = prefs.getBoolean("holdWatch", false)
+                  showOverlay = prefs.getBoolean("overlay", true)
+                  loadRoundSpeed()
                   traceOn = prefs.getBoolean("trace", true); driftOn = prefs.getBoolean("drift", true); learnOn = prefs.getBoolean("learn", true)
                   attemptNo = prefs.getInt("attemptSeq", 0)
                   hwNear = prefs.getFloat("hwNear", 100f).coerceIn(30f, 200f)
@@ -809,7 +829,7 @@ jobs:
                       override fun onStop() { status("capture was stopped by the system or another app", true); stopSelf() }
                   }, bg)
 
-                  guide = GuideView(this).also {
+                  guide = if (!towerMode && !showOverlay) null else GuideView(this).also {
                       val lp = WindowManager.LayoutParams(
                           WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT,
                           WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
@@ -1037,9 +1057,23 @@ jobs:
 
               private fun analyze(img: Image) {
                   // the pole never showed up although we held a normal press: switch to the fixed-length press and retry
-                  if (autoActive && !pressTimed && !fValid && SystemClock.elapsedRealtime() - pressedAtMs > 1500L) {
-                      autoRelease(); useTimed = true
-                      retry("no pole appeared, switching to a fixed-length hold")
+                  if (autoActive && !pressTimed && !fValid) {
+                      val held = SystemClock.elapsedRealtime() - pressedAtMs
+                      if (watchRound) {
+                          // the pole is not being followed (yet). Never let go while it is falling: one full loop later it is at the same height
+                          // as a fixed-length hold of the same time, so let go then
+                          if (held > 1500L && !hwFallbackSet) {
+                              hwFallbackSet = true
+                              val wait = max(0L, pressedAtMs + loopMs + hwFixedDur - SystemClock.elapsedRealtime())
+                              wnote("pole not followed, fallback release in " + wait + " ms")
+                              val tk = autoToken
+                              bg.postDelayed({ if (autoActive && autoToken == tk && !fValid) autoRelease() }, wait)
+                          }
+                          if (held > 6000L) { autoRelease(); watchFails++; if (watchFails >= 2) useTimed = true; retry("no pole appeared") }
+                      } else if (held > 1500L) {
+                          autoRelease(); useTimed = true
+                          retry("no pole appeared, switching to a fixed-length hold")
+                      }
                   }
                   if (towerMode) { analyzeTower(img); return }
                   if (autoState == 2 && perfectWatch && !gameOverSeen && SystemClock.elapsedRealtime() - releasedAtMs <= 4000L && gameOverBand(img))
@@ -1103,7 +1137,14 @@ jobs:
                       if (hwActive) {
                           // hold and watch: the pole also goes down to the ground and up again, so a short blind moment is normal
                           if (len >= minLen) lastVisibleMs = nowMs
-                          if (edgeOk && nowMs - lastVisibleMs < 900L && (autoActive || len >= minLen)) { watchStep(ts, len); return }
+                          if (autoActive) {
+                              // still holding: one odd frame (the edge not recognised, the tip not seen) must not let go of the finger
+                              val bad = !edgeOk || nowMs - lastVisibleMs > 1500L
+                              if (!bad) { badSinceMs = 0L; watchStep(ts, len); return }
+                              if (badSinceMs == 0L) badSinceMs = nowMs
+                              if (nowMs - badSinceMs < 700L) return
+                              wnote("tracking lost for 700 ms")
+                          } else if (edgeOk && nowMs - lastVisibleMs < 900L && len >= minLen) { watchStep(ts, len); return }
                           dropHold()
                       } else {
                           if (edgeOk && len >= minLen) { hold(ts, len); return }
@@ -1262,6 +1303,7 @@ jobs:
                           fSy = sy; fSy2 = sy2
                           maxLen = len; lastGrowTs = ts; holdStartTs = ts
                           if (autoActive) { traceFirstMs = SystemClock.elapsedRealtime() - pressedAtMs; traceFirstH = len }
+                          if (autoActive && watchRound) { watchFails = 0; badSinceMs = 0L; wnote("pole followed from " + len.toInt() + " px") }
                           hold(ts, len); return
                       }
                   } else { arm = 0; armPrev = 0f }
@@ -1325,7 +1367,7 @@ jobs:
                   if (lastRate < 50f) return
                   val timeErrMs = (finalLen - aim) / lastRate * 1000f
                   if (abs(timeErrMs) > 500f) return            // ignore wild outliers (e.g. you let go on purpose)
-                  if (lastRate in 280f..380f) rateEst = rateEst * 0.7f + lastRate * 0.3f
+                  if (lastRate in 300f..365f) rateEst = rateEst * 0.9f + lastRate * 0.1f
                   leadMs = (leadMs + 0.4f * timeErrMs).coerceIn(30f, 400f)
                   getSharedPreferences("p", MODE_PRIVATE).edit().putFloat("lead", leadMs).putFloat("rateEst", rateEst).apply()
               }
@@ -1349,26 +1391,11 @@ jobs:
                       if (rejectRun < 4) { status("odd round ignored for learning (" + abs(offModel.toInt()) + " px off the timing model)", true); return }
                   }
                   rejectRun = 0
-                  durSamples.add(pressDur.toFloat()); lenSamples.add(lObs)
-                  if (durSamples.size > 12) { durSamples.removeAt(0); lenSamples.removeAt(0) }
-                  var fitted = false
-                  if (durSamples.size >= 4) {
-                      val md = durSamples.average().toFloat(); val ml = lenSamples.average().toFloat()
-                      var num = 0f; var den = 0f
-                      for (i in durSamples.indices) {
-                          num += (durSamples[i] - md) * (lenSamples[i] - ml); den += (durSamples[i] - md) * (durSamples[i] - md)
-                      }
-                      val span = durSamples.max() - durSamples.min()
-                      if (den > 1f && span >= 120f && num > 0f) {
-                          val a = num / den; val r = a * 1000f           // px per second
-                          if (r in 280f..380f) { rateEst = r; timedAdjMs = (md - ml / a).coerceIn(-50f, 60f); fitted = true }
-                      }
-                  }
-                  if (!fitted) {
-                      val errMs = (lObs - pressAim) / rateEst * 1000f
-                      timedAdjMs = (timedAdjMs - 0.3f * errMs).coerceIn(-50f, 60f)
-                  }
-                  getSharedPreferences("p", MODE_PRIVATE).edit().putFloat("timedAdj", timedAdjMs).putFloat("rateEst", rateEst).apply()
+                  // the base timing (first 20 rounds only) moves slowly and stays inside tight limits; the pole speed is fixed, the book and the
+                  // round speed factor take care of the rest
+                  val errMs = (lObs - pressAim) / rateEst * 1000f
+                  if (settledRound <= 20 && abs(errMs) < 80f) timedAdjMs = (timedAdjMs - 0.15f * errMs).coerceIn(-10f, 40f)
+                  getSharedPreferences("p", MODE_PRIVATE).edit().putFloat("timedAdj", timedAdjMs).apply()
                   val off = (lObs - pressAim).toInt()
                   status("bridge ended " + abs(off) + " px " + (if (off > 0) "long" else "short") + ", hold adjust now " + timedAdjMs.toInt() + " ms", true)
               }
@@ -1385,11 +1412,20 @@ jobs:
                   // the hold and the miss as they would have been without the drift correction (the book stores those)
                   val holdBase = if (pressTimed) pressDur.toFloat() - pressDrift else -1f
                   val errBase = if (haveL && pressTimed) err - pressDrift * rateEst / 1000f else err
+                  // the pole speed of this round compared with the first rounds: corrected after every round from round 19 on
+                  if (haveL && pressTimed && learnOn && roundNo >= 19 && abs(err) <= 40f && pressDur - timedAdjMs > 100f) {
+                      val fObs = lObs / (rateEst * (pressDur - timedAdjMs) / 1000f)
+                      if (fObs in 0.85f..1.6f) {
+                          val n = min(roundNo, 60)
+                          roundSpeed[n] = (roundSpeed[n] + 0.4f * (fObs - roundSpeed[n])).coerceIn(0.9f, 1.5f)
+                          saveRoundSpeed()
+                      }
+                  }
                   if (haveL && pressTimed && abs(errBase) <= 30f) { recentErr.add(errBase); while (recentErr.size > 7) recentErr.removeAt(0) }
                   // a "Perfect" whose hold is far from what the timing model says is probably a misread: do not let it into the book
                   val odd = outcome == 0 && pressTimed && abs(pressDur - pressDrift - PerfBook.bookModel(bookNow(), pressAim, pressAim / rateEst * 1000f + timedAdjMs)) > 60f
                   var saved = false
-                  if (!odd && (haveL || outcome == 0)) {                       // always recorded: the switch only decides whether the book is used for holds
+                  if (!odd && roundNo <= 20 && (haveL || outcome == 0)) {      // the book keeps the holds of the first 20 rounds; later rounds use the speed factor                       // always recorded: the switch only decides whether the book is used for holds
                       bookSize = PerfBook.record(this, pressAim, pressGap, pressPw, holdBase, errBase, outcome)
                       saved = true
                   }
@@ -1400,8 +1436,9 @@ jobs:
                       val bat = battery()
                       val startMs = if (traceFirstMs >= 0L && traceFirstH > 0f) traceFirstMs - traceFirstH / rateEst * 1000f else -1f
                       RunTrace.add(this, RunTrace.Rec(System.currentTimeMillis(), attemptNo, roundNo, pressAim, pressGap, pressPw,
-                          if (pressTimed) "T" else "W", if (pressTimed) pressDur.toFloat() else 0f, if (haveL) err else 0f, outcome, if (sug != null) 1 else 0,
-                          bat[0], bat[1].toInt(), bat[2].toInt(), procMs, fpsEma, frameAgeMs, startMs, rateEst, timedAdjMs, leadMs, pressDrift))
+                          if (pressTimed) "T" else if (hwDir > 0) "WU" else if (hwDir < 0) "WD" else "W?",
+                          if (pressTimed) pressDur.toFloat() else lastHoldMs.toFloat(), if (haveL) err else 0f, outcome, if (sug != null) 1 else 0,
+                          bat[0], bat[1].toInt(), bat[2].toInt(), procMs, fpsEma, frameAgeMs, startMs, rateEst, timedAdjMs, leadMs, pressDrift, pressFactor))
                   }
                   bookAt = 0L
                   val off = err.toInt()
@@ -1414,11 +1451,37 @@ jobs:
                   val src = if (sug != null) "book used: " + usedHow else "no book entry"
                   val how = if (pressTimed) "hold " + pressDur + " ms"
                             else "watch, let go " + (if (hwDir > 0) "going up" else if (hwDir < 0) "coming down" else "(no release seen)")
-                  val line = "#" + roundNo + " " + res + " | " + src + " | " + how + " | distance " + pressAim.toInt() + " px" + (if (odd) " | NOT saved: hold far from the timing model" else if (saved) " | saved" else "")
+                  val line = "#" + roundNo + " " + res + " | " + src + " | " + how + " | distance " + pressAim.toInt() + " px" + (if (odd) " | NOT saved: hold far from the timing model" else if (saved) " | saved" else "") +
+                      (if (pressFactor != 1f) " | round speed x" + String.format(java.util.Locale.US, "%.2f", pressFactor) else "") +
+                      (if (!pressTimed && wlog.isNotEmpty()) " | " + wlog.toString().trim() else "")
                   EventLog.add(this, line)
                   status(line, true)
                   if (outcome == 2) { roundNo = 0; recentErr.clear() }
               }
+
+              // The pole grows faster the further an attempt gets: in the first trace about 13% faster from round 21 and about 20% by round 25.
+              // Those numbers are the starting values; they are corrected after every round.
+              private fun loadRoundSpeed() {
+                  roundSpeed = FloatArray(61) { 1f }
+                  val prior = floatArrayOf(1.13f, 1.14f, 1.18f, 1.19f, 1.20f)         // rounds 21 to 25, then the last value
+                  for (n in 21..60) roundSpeed[n] = prior[min(n - 21, prior.size - 1)]
+                  val str = getSharedPreferences("p", MODE_PRIVATE).getString("roundSpeed", "") ?: ""
+                  for (part in str.split(',')) {
+                      val kv = part.split(':')
+                      if (kv.size != 2) continue
+                      val n = kv[0].toIntOrNull() ?: continue
+                      val f = kv[1].toFloatOrNull() ?: continue
+                      if (n in 19..60 && f in 0.9f..1.5f) roundSpeed[n] = f
+                  }
+              }
+
+              private fun saveRoundSpeed() {
+                  val sb = StringBuilder()
+                  for (n in 19..60) { if (sb.isNotEmpty()) sb.append(','); sb.append(n).append(':').append(String.format(java.util.Locale.US, "%.3f", roundSpeed[n])) }
+                  getSharedPreferences("p", MODE_PRIVATE).edit().putString("roundSpeed", sb.toString()).apply()
+              }
+
+              private fun roundFactor(n: Int): Float = if (n < 19) 1f else roundSpeed[min(n, 60)]
 
               /** Hold correction (ms) from the last rounds of this attempt: the middle value of how far they ended from the dot, mostly cancelled (nothing for shifts under 2.5 px). */
               private fun driftMs(): Float {
@@ -1489,16 +1552,20 @@ jobs:
                   if (!autoActive) {                                   // we have let go: the pole is falling now
                       dropHold(); cooldownUntil = ts + 800_000_000L; show(0, 0f, "released"); return
                   }
-                  if (nowMs - pressedAtMs > 3800L) {                   // about two loops and no release: give up (counts as a miss)
-                      autoRelease(); dropHold(); cooldownUntil = ts + 800_000_000L; show(0, 0f, "watch timed out"); return
+                  if (nowMs - pressedAtMs > 5000L) {                   // about three loops and no release: give up (counts as a miss)
+                      wnote("timed out"); autoRelease(); dropHold(); cooldownUntil = ts + 800_000_000L; show(0, 0f, "watch timed out"); return
                   }
                   val minV = max(10f, fW * 0.015f)
-                  if (len >= minV) {
+                  // a tip at the very top of the screen may be higher still: do not use it for the speed
+                  val pinLimit = fTop.toFloat() - 3f
+                  val pinned = len >= pinLimit
+                  if (len >= minV && !pinned) {
                       if (tsN.isEmpty()) t0 = ts
                       tsN.add((ts - t0) / 1e9f); lsN.add(len)
                       if (tsN.size > 6) { tsN.removeAt(0); lsN.removeAt(0) }
-                      if (len > hwTarget + 12f) hwSawAbove = true
+                      lastGoodLen = len; lastGoodMs = nowMs
                   }
+                  if ((len > hwTarget + 12f || pinned) && !hwSawAbove) { hwSawAbove = true; wnote("above the target at " + len.toInt() + " px") }
                   // signed speed in px/s: positive while the pole rises, negative while it falls
                   var rate = 0f
                   if (tsN.size >= 4) {
@@ -1509,13 +1576,21 @@ jobs:
                   }
                   val speed = abs(rate)
                   val dir = if (rate > 150f) 1 else if (rate < -150f) -1 else 0
+                  if (dir == 1 && speed > 150f) lastGoodSpeed = speed
+                  // a target above the top of the screen cannot be watched: go by the last speed seen
+                  if (pinned && hwTarget >= pinLimit - 10f && !hwPosted && hwDir == 0 && lastGoodSpeed > 150f) {
+                      hwPosted = true; hwPending = 1; bg.removeCallbacks(hwRelease)
+                      val d = (hwTarget - lastGoodLen) / lastGoodSpeed * 1000f - leadMs - (nowMs - lastGoodMs)
+                      wnote("target above the screen, release planned in " + d.toInt() + " ms")
+                      if (d <= 0f) { hwDir = 1; autoRelease() } else bg.postDelayed(hwRelease, d.toLong())
+                  }
                   // far targets: let go on the way up. Close targets (or after overshooting): let it pass, let go on the way down
                   val wantDown = pressAim < hwNear || hwSawAbove
                   val wantDir = if (wantDown) -1 else 1
                   if (len >= minV && dir == wantDir && (wantDir == 1 || hwSawAbove)) {
                       val rem = if (wantDir == 1) hwTarget - len else len - hwTarget      // px still to go before the target height
                       val delay = rem / speed * 1000f - leadMs                             // ms from now until we must let go
-                      if (delay <= 0f) { hwDir = wantDir; bg.removeCallbacks(hwRelease); autoRelease() }
+                      if (delay <= 0f) { hwDir = wantDir; bg.removeCallbacks(hwRelease); wnote("released " + (if (wantDir == 1) "going up" else "coming down") + " at " + len.toInt() + " px (target " + hwTarget.toInt() + ")"); autoRelease() }
                       else if (delay < 350f) { hwPending = wantDir; bg.removeCallbacks(hwRelease); bg.postDelayed(hwRelease, delay.toLong()) }
                   }
                   lastRate = speed
@@ -1524,10 +1599,15 @@ jobs:
                       shown, hwTarget, rate, if (wantDown) "(waiting for the way down)" else "(going up)", leadMs))
               }
 
-              private fun hwFire() { if (autoActive) { hwDir = hwPending; autoRelease() } }
+              private fun hwFire() { if (autoActive) { hwDir = hwPending; wnote("released " + (if (hwDir > 0) "going up" else "coming down") + " by the planned time (target " + hwTarget.toInt() + ")"); autoRelease() } }
+
+              private fun wnote(t: String) {
+                  if (wlog.length < 700) wlog.append('+').append(SystemClock.elapsedRealtime() - pressedAtMs).append("ms ").append(t).append("; ")
+              }
 
               private fun autoRelease() {
                   if (autoActive) {
+                      lastHoldMs = SystemClock.elapsedRealtime() - pressedAtMs
                       autoActive = false
                       TapService.instance?.release()
                       if (autoState == 1) { autoState = 2; releasedAtMs = SystemClock.elapsedRealtime(); bridgeTipMax = -1; perfectWatch = true; perfectSeen = false; gameOverSeen = false }
@@ -1550,6 +1630,7 @@ jobs:
                       0 -> if (now >= readyAtMs && !autoActive && hist.size >= 3) {
                           if (startAuto(aim, now)) {
                               roundNo++
+                              settledRound = roundNo
                               if (roundNo == 1) { attemptNo++; getSharedPreferences("p", MODE_PRIVATE).edit().putInt("attemptSeq", attemptNo).apply() }
                               autoState = 1; pressGap = gap; pressPw = pw; pressBase = base }
                       }
@@ -1590,7 +1671,8 @@ jobs:
                   watchRound = holdWatch && !pressTimed
                   pressAim = aim
                   usedSug = null; usedHow = ""
-                  pressDrift = 0f; traceFirstMs = -1L
+                  pressDrift = 0f; traceFirstMs = -1L; pressFactor = 1f
+                  wlog.setLength(0); hwPosted = false; hwFallbackSet = false; badSinceMs = 0L
                   hwDir = 0; hwPending = 0; hwSawAbove = false; hwTarget = aim
                   pressedAtMs = now; autoToken = now; lastVisibleMs = now
                   val token = now
@@ -1606,6 +1688,9 @@ jobs:
                           pressDrift = c
                           dur = max(60L, dur + c.toLong())
                       }
+                      // the pole grows faster the further an attempt gets: shorten the hold by the factor of this round
+                      pressFactor = roundFactor(roundNo + 1)
+                      if (pressFactor != 1f) dur = max(60L, ((dur - timedAdjMs) / pressFactor + timedAdjMs).toLong())
                       pressDur = dur
                       if (!svc.holdFor(x, y, dur)) { status("press was refused by Android", true); readyAtMs = now + 3000L; return false }
                       autoActive = true; hwActive = false
@@ -1617,10 +1702,11 @@ jobs:
                           if (sg != null) { hwTarget = aim + sg.value; usedSug = sg; usedHow = sg.how }
                       }
                       pressDur = 0L
+                      hwFixedDur = max(60L, (if (perfMemOn) PerfBook.bookModel(bookNow(), aim, ms + timedAdjMs) else ms + timedAdjMs).toLong())
                       if (!svc.press(x, y)) { status("press was refused by Android", true); readyAtMs = now + 3000L; return false }
                       autoActive = true; hwActive = watchRound
                       // safety net: a watched hold may last about two loops of the pole, a normal one only until the aim
-                      bg.postDelayed({ if (autoActive && autoToken == token) autoRelease() }, if (watchRound) 4000L else max(400f, ms + 600f).toLong())
+                      bg.postDelayed({ if (autoActive && autoToken == token) autoRelease() }, if (watchRound) 5200L else max(400f, ms + 600f).toLong())
                       status("holding at ${x.toInt()},${y.toInt()}, " + (if (watchRound) "watching the pole, target " + hwTarget.toInt() + " px" else "release at aim " + aim.toInt()) +
                           (if (usedHow.isNotEmpty()) " [book: $usedHow]" else ""), true)
                   }
@@ -2202,7 +2288,7 @@ jobs:
                   val e = of(c).edit()
                   BRIDGE.forEach { e.remove(it.key) }
                   e.remove("auto_bridge"); e.remove("timedAlways"); e.remove("perfMem"); e.remove("holdWatch")
-                  e.remove("drift"); e.remove("learn"); e.remove("trace"); e.apply()
+                  e.remove("drift"); e.remove("learn"); e.remove("trace"); e.remove("overlay"); e.apply()
               }
 
               fun resetTower(c: Context) {
@@ -2340,7 +2426,7 @@ jobs:
                   val method: String, val hold: Float, val miss: Float, val outcome: Int, val book: Int,
                   val temp: Float, val battery: Int, val thermal: Int,
                   val procMs: Float, val fps: Float, val ageMs: Float, val startMs: Float,
-                  val speed: Float, val adjust: Float, val lead: Float, val drift: Float
+                  val speed: Float, val adjust: Float, val lead: Float, val drift: Float, val factor: Float = 1f
               )
 
               private const val KEY = "runTrace"
@@ -2351,22 +2437,22 @@ jobs:
                   val out = ArrayList<Rec>()
                   for (part in s.split(';')) {
                       val f = part.split('|')
-                      if (f.size != 22) continue
+                      if (f.size != 22 && f.size != 23) continue
                       try {
                           out.add(Rec(f[0].toLong(), f[1].toInt(), f[2].toInt(), f[3].toFloat(), f[4].toFloat(), f[5].toFloat(),
                               f[6], f[7].toFloat(), f[8].toFloat(), f[9].toInt(), f[10].toInt(),
                               f[11].toFloat(), f[12].toInt(), f[13].toInt(),
                               f[14].toFloat(), f[15].toFloat(), f[16].toFloat(), f[17].toFloat(),
-                              f[18].toFloat(), f[19].toFloat(), f[20].toFloat(), f[21].toFloat()))
+                              f[18].toFloat(), f[19].toFloat(), f[20].toFloat(), f[21].toFloat(), if (f.size == 23) f[22].toFloat() else 1f))
                       } catch (e: Exception) { }
                   }
                   return out
               }
 
               private fun line(r: Rec): String = String.format(Locale.US,
-                  "%d|%d|%d|%.1f|%.1f|%.1f|%s|%.0f|%.1f|%d|%d|%.1f|%d|%d|%.1f|%.1f|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f",
+                  "%d|%d|%d|%.1f|%.1f|%.1f|%s|%.0f|%.1f|%d|%d|%.1f|%d|%d|%.1f|%.1f|%.0f|%.0f|%.0f|%.0f|%.0f|%.0f|%.3f",
                   r.t, r.attempt, r.round, r.dist, r.gap, r.w, r.method, r.hold, r.miss, r.outcome, r.book,
-                  r.temp, r.battery, r.thermal, r.procMs, r.fps, r.ageMs, r.startMs, r.speed, r.adjust, r.lead, r.drift)
+                  r.temp, r.battery, r.thermal, r.procMs, r.fps, r.ageMs, r.startMs, r.speed, r.adjust, r.lead, r.drift, r.factor)
 
               fun add(c: Context, r: Rec) {
                   val list = load(c)
@@ -2381,15 +2467,15 @@ jobs:
               fun csv(c: Context): String {
                   val fmt = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
                   val sb = StringBuilder()
-                  sb.append("time,attempt,round,distance,gap,width,method,hold_ms,miss_px,result,book_used,temp_c,battery,thermal,proc_ms,fps,frame_age_ms,start_delay_ms,speed,adjust_ms,lead_ms,drift_ms\n")
+                  sb.append("time,attempt,round,distance,gap,width,method,hold_ms,miss_px,result,book_used,temp_c,battery,thermal,proc_ms,fps,frame_age_ms,start_delay_ms,speed,adjust_ms,lead_ms,drift_ms,round_speed_factor\n")
                   for (r in load(c)) {
                       sb.append(fmt.format(Date(r.t))).append(',').append(r.attempt).append(',').append(r.round).append(',')
                       sb.append(String.format(Locale.US, "%.1f,%.1f,%.1f,", r.dist, r.gap, r.w))
                       sb.append(r.method).append(',')
                       sb.append(String.format(Locale.US, "%.0f,%.1f,", r.hold, r.miss))
                       sb.append(when (r.outcome) { 0 -> "Perfect"; 2 -> "GameOver"; else -> "Landed" }).append(',').append(r.book).append(',')
-                      sb.append(String.format(Locale.US, "%.1f,%d,%d,%.1f,%.1f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f\n",
-                          r.temp, r.battery, r.thermal, r.procMs, r.fps, r.ageMs, r.startMs, r.speed, r.adjust, r.lead, r.drift))
+                      sb.append(String.format(Locale.US, "%.1f,%d,%d,%.1f,%.1f,%.0f,%.0f,%.0f,%.0f,%.0f,%.0f,%.3f\n",
+                          r.temp, r.battery, r.thermal, r.procMs, r.fps, r.ageMs, r.startMs, r.speed, r.adjust, r.lead, r.drift, r.factor))
                   }
                   return sb.toString()
               }
@@ -2439,6 +2525,10 @@ jobs:
                       c.addView(label("Perfect " + p + " (" + (100 * p / rs.size) + "%)   \u00b7   Game Over " + g, 14f).apply { setPadding(0, dp(4), 0, 0) })
                       c.addView(label("Average miss " + sg(avg(misses)) + " px (+ long, - short)   \u00b7   typical size " + String.format(java.util.Locale.US, "%.1f", avg(misses.map { abs(it) })) + " px", 13f, Ui.muted)
                           .apply { setPadding(0, dp(2), 0, 0) })
+                      val spd = rs.filter { it.method == "T" && abs(it.miss) <= 40f && it.hold - it.adjust > 100f }
+                          .map { (it.dist + it.miss) / (it.hold - it.adjust) * 1000f }
+                      if (spd.isNotEmpty())
+                          c.addView(label("Effective pole speed " + Math.round(avg(spd)) + " px/s", 13f, Ui.muted).apply { setPadding(0, dp(2), 0, 0) })
                       val temps = rs.map { it.temp }.filter { it > 0f }
                       val starts = rs.map { it.startMs }.filter { it > 0f }
                       val procs = rs.map { it.procMs }.filter { it > 0f }
